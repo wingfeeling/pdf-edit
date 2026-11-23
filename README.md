@@ -1,11 +1,4 @@
 # PDF 線上編輯器
-
-網頁和後端放在同一個 Cloudflare Worker，檔案放在 GitHub。
-Cloudflare 連結這個 repo 後，**在 GitHub 改檔案 → Commit → 1～2 分鐘後網站自動更新**，自己的電腦不用裝 Node 或任何東西。
-
-**第一次上架請看 `上架教學.html`**（一步一步，含帳號要不要跟 ar-pet 分開的說明）。
-價格、試用次數、成本請看 `定價與成本試算.html`。
-
 ## 檔案說明
 
 ```
