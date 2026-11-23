@@ -35,7 +35,7 @@ enabled = true
 [vars]
 SITE_NAME = "PDF 線上編輯器"
 SITE_URL = ""                                   # 留空 = 自動用目前的網址。之後有自己的網域，填 "https://你的網域"
-FIREBASE_PROJECT_ID = "你的-firebase-專案-id"      # 跟 web/js/config.js 的 projectId 一樣
+FIREBASE_PROJECT_ID = "pdf-editor-54ab7"      # 跟 web/js/config.js 的 projectId 一樣
 SUPPORT_EMAIL = "你的客服信箱"
 
 # ===== 方案與價格（元、天數）=====
