@@ -21,7 +21,7 @@ crons = ["17 19 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "pdf-editor-db"
-database_id = "請貼上 D1 資料庫 ID"
+database_id = "de0a56fd-abff-47a5-8010-658d9a357b8e"
 
 # 檔案空間：先在 Cloudflare 主控台「R2 物件儲存」建立 pdf-editor-files
 [[r2_buckets]]
