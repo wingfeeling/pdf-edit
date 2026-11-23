@@ -5,10 +5,10 @@ window.APP_CONFIG = {
   apiBase: '',
   // Firebase 主控台 → 專案設定 → 一般 → 你的應用程式 → SDK 設定
   firebase: {
-    apiKey: '貼上 Firebase 的 apiKey',
-    authDomain: '你的專案.firebaseapp.com',
-    projectId: '你的專案',
-    appId: '貼上 appId'
+    apiKey: 'AIzaSyAnsN72g5l4VlensGpgwY9R3FFRKKoV1PE',
+    authDomain: 'pdf-editor-54ab7.firebaseapp.com',
+    projectId: 'pdf-editor-54ab7',
+    appId: '1:661653578609:web:a20b46249eae6ab7888cd0'
   },
   supportEmail: '你的客服信箱'
 };
