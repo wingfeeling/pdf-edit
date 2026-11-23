@@ -76,3 +76,12 @@ CREATE TABLE IF NOT EXISTS credit_log (   -- 每一次加份數／加天數的�
   reason TEXT, ref TEXT, created_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_credit_uid ON credit_log(uid);
+
+-- 沒有綁 R2 時，PDF 切成 1.8 MB 一塊存在這裡（不用綁信用卡）
+CREATE TABLE IF NOT EXISTS files (
+  key TEXT NOT NULL,             -- 跟 docs.orig_key / docs.signed_key 一樣
+  part INTEGER NOT NULL,         -- 第幾塊，從 0 開始
+  data BLOB,
+  created_at INTEGER,
+  PRIMARY KEY (key, part)
+);

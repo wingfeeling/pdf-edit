@@ -8,7 +8,7 @@
  *  - 每日排程：刪除過期批次
  *  - 網頁（web 資料夾）也由這個 Worker 一起提供，網頁和後端同一個網址
  *
- * 綁定：DB (D1)、FILES (R2)、ASSETS（網頁）。設定值見 wrangler.toml 的 [vars] 與 README。
+ * 綁定：DB (D1)、ASSETS（網頁）；FILES (R2) 可有可無——沒有 R2 時，PDF 切塊存進 D1（不用綁信用卡）。設定值見 wrangler.toml 的 [vars] 與 README。
  * 資料表會在第一次有人連線時自動建立，不用另外執行 schema.sql。
  */
 
@@ -186,7 +186,48 @@ async function readPdf(req, env) {
   if (!s.includes('%PDF-')) throw new HttpError(415, '這不是 PDF 檔');
   return buf;
 }
-async function deleteKeys(env, keys) { keys = keys.filter(Boolean); for (let i = 0; i < keys.length; i += 900) await env.FILES.delete(keys.slice(i, i + 900)); }
+/* ---------- 檔案儲存 ----------
+ * 有綁 R2（FILES）就用 R2；沒有綁就把 PDF 切成小塊存進 D1 資料庫（D1 不用綁信用卡）。
+ * D1 每一列最大 2 MB，所以每塊 1.8 MB；讀取時一塊一塊送出，不會一次占用太多記憶體。
+ * 想把檔案和其他資料分開，可以另外建一個 D1、綁定名稱填 FILEDB；沒有就跟主資料庫放一起。 */
+const CHUNK = 1800000;
+const fileDb = env => env.FILEDB || env.DB;
+async function filePut(env, key, buf) {
+  if (env.FILES) return env.FILES.put(key, buf, { httpMetadata: { contentType: 'application/pdf' } });
+  const db = fileDb(env), u8 = new Uint8Array(buf), t = now();
+  const st = [db.prepare('DELETE FROM files WHERE key = ?').bind(key)];
+  for (let i = 0, part = 0; i < u8.length || part === 0; i += CHUNK, part++)
+    st.push(db.prepare('INSERT INTO files (key, part, data, created_at) VALUES (?, ?, ?, ?)').bind(key, part, u8.slice(i, i + CHUNK).buffer, t));
+  await db.batch(st);   // 一次寫入，全部成功或全部失敗
+}
+async function fileGet(env, key) {
+  if (env.FILES) return env.FILES.get(key);
+  const db = fileDb(env);
+  const { results } = await db.prepare('SELECT part FROM files WHERE key = ? ORDER BY part').bind(key).all();
+  if (!results.length) return null;
+  const parts = results.map(r => r.part); let i = 0;
+  const body = new ReadableStream({
+    async pull(ctrl) {
+      if (i >= parts.length) return ctrl.close();
+      const r = await db.prepare('SELECT data FROM files WHERE key = ? AND part = ?').bind(key, parts[i++]).first();
+      if (r && r.data) ctrl.enqueue(new Uint8Array(r.data));
+    }
+  });
+  return { body };
+}
+async function deleteKeys(env, keys) {
+  keys = keys.filter(Boolean); if (!keys.length) return;
+  if (env.FILES) { for (let i = 0; i < keys.length; i += 900) await env.FILES.delete(keys.slice(i, i + 900)); return; }
+  const db = fileDb(env);
+  for (let i = 0; i < keys.length; i += 50) { const k = keys.slice(i, i + 50); await db.prepare(`DELETE FROM files WHERE key IN (${k.map(() => '?').join(',')})`).bind(...k).run(); }
+}
+// 檔案空間上限：R2 用 GB 設定；存在 D1 時用 MB 設定（D1 免費版每個資料庫最大 500 MB）
+function storageLimits(env) {
+  const num = (k, d) => { const v = parseFloat(env[k]); return Number.isFinite(v) ? v : d; };
+  if (env.FILES) return { mode: 'r2', limit: num('R2_FREE_GB', 10) * 1073741824, guard: num('TRIAL_STORAGE_GUARD_GB', 8) * 1073741824, hard: 0 };
+  const limit = num('D1_FILE_LIMIT_MB', 450) * 1048576;
+  return { mode: 'd1', limit, guard: num('D1_TRIAL_GUARD_MB', 300) * 1048576, hard: limit };
+}
 async function deleteBatch(env, b) {
   const { results } = await env.DB.prepare('SELECT orig_key, signed_key FROM docs WHERE batch_id = ?').bind(b.id).all();
   await deleteKeys(env, results.flatMap(r => [r.orig_key, r.signed_key]));
@@ -253,7 +294,7 @@ async function route(req, env, ctx) {
   if ((m = p.match(/^\/api\/sign\/([^/]+)\/file$/)) && M === 'GET') {
     const d = await signDoc(req, env, m[1]);
     const key = d.status === 'signed' ? d.signed_key : d.orig_key;
-    const obj = await env.FILES.get(key); if (!obj) throw new HttpError(404, '檔案不存在');
+    const obj = await fileGet(env, key); if (!obj) throw new HttpError(404, '檔案不存在');
     return fileResponse(obj, d.status === 'signed' ? signedName(d.filename) : d.filename, req, env);
   }
   if ((m = p.match(/^\/api\/sign\/([^/]+)\/submit$/)) && M === 'POST') {
@@ -262,11 +303,11 @@ async function route(req, env, ctx) {
     if (d.deadline && now() > d.deadline + DAY) throw new HttpError(403, '已經超過簽名期限，請聯絡承辦人員');
     const buf = await readPdf(req, env);
     const key = `b/${d.batch_id}/${d.id}/signed-${randId(6)}.pdf`;
-    await env.FILES.put(key, buf, { httpMetadata: { contentType: 'application/pdf' } });
+    await filePut(env, key, buf);
     const ip = req.headers.get('CF-Connecting-IP') || '';
     const r = await env.DB.prepare("UPDATE docs SET status = 'signed', signed_key = ?, signed_size = ?, signed_at = ?, signed_ip = ?, signed_email = ? WHERE id = ? AND status != 'signed'")
       .bind(key, buf.byteLength, now(), ip, d._viewer || '', d.id).run();
-    if (!r.meta.changes) { await env.FILES.delete(key); throw new HttpError(409, '這份文件已經簽好了，不能再修改'); }
+    if (!r.meta.changes) { await deleteKeys(env, [key]); throw new HttpError(409, '這份文件已經簽好了，不能再修改'); }
     return J({ ok: true, signed_at: now() });
   }
 
@@ -319,8 +360,11 @@ async function route(req, env, ctx) {
     const c = await env.DB.prepare('SELECT COUNT(*) AS n FROM docs WHERE batch_id = ?').bind(b.id).first();
     if (c.n >= max) throw new HttpError(413, `一個批次最多 ${max} 份文件，請另外建立一個批次`);
     const buf = await readPdf(req, env);
-    if (b.trial) {   // 免費試用的總空間到警戒線時，先停止試用上傳；付費的照常（超過的空間每 GB 每月只要幾毛美金）
-      const guard = intVar(env, 'TRIAL_STORAGE_GUARD_GB', 8) * 1073741824;
+    const lim = storageLimits(env);
+    if (lim.hard > 0 && (await storedBytes(env)) + buf.byteLength > lim.hard)   // 檔案存在 D1 時，滿了就不能再上傳，免得整個資料庫寫不進去
+      throw new HttpError(503, '網站的檔案空間已滿，請先刪除已經不用的批次，或聯絡網站管理者', { storage_full: true });
+    if (b.trial) {   // 免費試用的總空間到警戒線時，先停止試用上傳；付費的照常
+      const guard = lim.guard;
       if (guard > 0 && (await storedBytes(env)) + buf.byteLength > guard) throw new HttpError(503, '網站的免費試用空間暫時額滿，請過幾天再試，或購買簽名份數後馬上就能上傳', { need_pay: true, storage_full: true });
     }
     let meta = {}; try { meta = JSON.parse(decodeURIComponent(req.headers.get('X-Meta') || '%7B%7D')); } catch (e) { }
@@ -328,10 +372,10 @@ async function route(req, env, ctx) {
     const credit = await spendCredit(env, u, b);
     const id = randId(9), token = randId(24), key = `b/${b.id}/${id}/orig.pdf`;
     try {
-      await env.FILES.put(key, buf, { httpMetadata: { contentType: 'application/pdf' } });
+      await filePut(env, key, buf);
       await env.DB.prepare("INSERT INTO docs (id, batch_id, owner_uid, filename, student_id, student_name, email, token, status, orig_key, orig_size, sent_count, created_at, credit) VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?, 0, ?, ?)")
         .bind(id, b.id, u.uid, filename, String(meta.student_id || '').slice(0, 40), String(meta.student_name || '').slice(0, 60), normEmail(meta.email).slice(0, 200), token, key, buf.byteLength, now(), credit).run();
-    } catch (e) { await refundCredit(env, u.uid, credit); try { await env.FILES.delete(key); } catch (e2) { } throw e; }
+    } catch (e) { await refundCredit(env, u.uid, credit); try { await deleteKeys(env, [key]); } catch (e2) { } throw e; }
     const d = await env.DB.prepare('SELECT * FROM docs WHERE id = ?').bind(id).first();
     return J({ doc: docOut(env, d, req) });
   }
@@ -359,7 +403,7 @@ async function route(req, env, ctx) {
     const u = await authUser(req, env); const d = await ownDoc(env, u, m[1]);
     const signed = url.searchParams.get('v') === 'signed'; const key = signed ? d.signed_key : d.orig_key;
     if (!key) throw new HttpError(404, '這份文件還沒有簽名檔');
-    const obj = await env.FILES.get(key); if (!obj) throw new HttpError(404, '檔案不存在');
+    const obj = await fileGet(env, key); if (!obj) throw new HttpError(404, '檔案不存在');
     return fileResponse(obj, signed ? signedName(d.filename) : d.filename, req, env, url.searchParams.get('dl') !== '1');
   }
   if ((m = p.match(/^\/api\/docs\/([^/]+)\/return$/)) && M === 'POST') {
@@ -367,7 +411,7 @@ async function route(req, env, ctx) {
     if (d.status !== 'signed') throw new HttpError(409, '這份文件還沒簽名，不需要退回');
     const reason = String(x.reason || '').slice(0, 500);
     await env.DB.prepare("UPDATE docs SET status = 'returned', signed_key = NULL, signed_size = NULL, signed_at = NULL, return_reason = ? WHERE id = ?").bind(reason, d.id).run();
-    if (d.signed_key) await env.FILES.delete(d.signed_key);
+    if (d.signed_key) await deleteKeys(env, [d.signed_key]);
     return J({ ok: true, sign_url: signUrl(env, d.token, req) });
   }
 
@@ -451,12 +495,15 @@ async function siteStats(env) {
   const usage = (await env.DB.prepare('SELECT feature, COUNT(*) AS n FROM usage WHERE created_at >= ? GROUP BY feature').bind(now() - 30 * DAY).all()).results;
   const split = await one("SELECT COALESCE(SUM(CASE WHEN b.trial = 1 THEN COALESCE(d.orig_size,0) + COALESCE(d.signed_size,0) END),0) AS trial_bytes FROM docs d JOIN batches b ON b.id = d.batch_id");
   const credits = await one('SELECT COALESCE(SUM(doc_credits),0) AS open_credits, SUM(CASE WHEN credits_until > ? AND doc_credits > 0 THEN 1 ELSE 0 END) AS buyers FROM users WHERE credits_until > ?', now(), now());
-  const storageLimit = intVar(env, 'R2_FREE_GB', 10) * 1073741824; const guard = intVar(env, 'TRIAL_STORAGE_GUARD_GB', 8) * 1073741824;
-  const overGB = Math.max(0, files.bytes - storageLimit) / 1073741824;
+  const lim = storageLimits(env), storageLimit = lim.limit, guard = lim.guard;
+  const overGB = lim.mode === 'r2' ? Math.max(0, files.bytes - storageLimit) / 1073741824 : 0;
+  const size = b => b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : (b / 1048576).toFixed(0) + ' MB';
   const warn = [];
-  if (files.bytes > storageLimit * 0.8) warn.push(`檔案空間已用 ${(files.bytes / 1073741824).toFixed(2)} GB，超過免費額度（${env.R2_FREE_GB || 10} GB）的 80%${overGB > 0 ? `；超出 ${overGB.toFixed(1)} GB，約每月 US$ ${(Math.ceil(overGB) * 0.015).toFixed(2)}` : ''}`);
-  if (guard > 0 && files.bytes > guard) warn.push(`總空間超過試用警戒線（${env.TRIAL_STORAGE_GUARD_GB || 8} GB），免費試用的新上傳已暫停，付費客戶不受影響`);
-  return { users, files: { ...files, ...split, limit_bytes: storageLimit, trial_guard_bytes: guard, over_gb: overGB }, credits, batches, sales_this_month: sales, usage_30d: usage, warnings: warn, time: now() };
+  if (files.bytes > storageLimit * 0.8) warn.push(lim.mode === 'r2'
+    ? `檔案空間已用 ${size(files.bytes)}，超過免費額度（${size(storageLimit)}）的 80%${overGB > 0 ? `；超出 ${overGB.toFixed(1)} GB，約每月 US$ ${(Math.ceil(overGB) * 0.015).toFixed(2)}` : ''}`
+    : `檔案空間已用 ${size(files.bytes)}，快到上限（${size(storageLimit)}）。滿了以後就不能再上傳新文件，請刪除不用的批次，或把保存天數調短`);
+  if (guard > 0 && files.bytes > guard) warn.push(`總空間超過試用警戒線（${size(guard)}），免費試用的新上傳已暫停，付費客戶不受影響`);
+  return { users, files: { ...files, ...split, storage: lim.mode, limit_bytes: storageLimit, trial_guard_bytes: guard, over_gb: overGB }, credits, batches, sales_this_month: sales, usage_30d: usage, warnings: warn, time: now() };
 }
 async function cron(env) {
   await ensureSchema(env);
@@ -483,8 +530,13 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_credit_uid ON credit_log(uid)`
 ];
 let schemaReady = null;
+const FILE_SCHEMA = [`CREATE TABLE IF NOT EXISTS files (key TEXT NOT NULL, part INTEGER NOT NULL, data BLOB, created_at INTEGER, PRIMARY KEY (key, part))`];
 function ensureSchema(env) {
-  if (!schemaReady) schemaReady = env.DB.batch(SCHEMA.map(q => env.DB.prepare(q))).catch(e => { schemaReady = null; throw e; });
+  if (!schemaReady) {
+    const jobs = [env.DB.batch(SCHEMA.map(q => env.DB.prepare(q)))];
+    if (!env.FILES) jobs.push(fileDb(env).batch(FILE_SCHEMA.map(q => fileDb(env).prepare(q))));   // 沒有 R2：PDF 存在 D1 的 files 資料表
+    schemaReady = Promise.all(jobs).catch(e => { schemaReady = null; throw e; });
+  }
   return schemaReady;
 }
 
