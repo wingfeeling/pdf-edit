@@ -1,0 +1,69 @@
+# Cloudflare Worker 設定檔：網頁＋後端放在同一個 Worker
+# 部署方式：這個 GitHub repo 連結 Cloudflare（Workers Builds），
+#           每次在 GitHub 改檔案、推上 main，Cloudflare 會自動重新部署，不用在自己電腦上裝任何東西。
+# ★ name 一定要和 Cloudflare 主控台上的 Worker 名稱一模一樣，不然自動部署會失敗。
+name = "pdf-editor"
+main = "worker/src/index.js"
+compatibility_date = "2025-11-01"
+
+# 網頁：web 資料夾裡的檔案。/api/ 開頭的網址交給後端程式，其他都是網頁
+[assets]
+directory = "./web"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# 每天台灣時間凌晨 3:17 執行：刪除過期批次（cron 用 UTC）
+[triggers]
+crons = ["17 19 * * *"]
+
+# 資料庫：先在 Cloudflare 主控台「儲存空間與資料庫 → D1」建立 pdf-editor-db，
+#         把它的「資料庫 ID」貼到下面（資料表會自動建立，不用另外執行 SQL）
+[[d1_databases]]
+binding = "DB"
+database_name = "pdf-editor-db"
+database_id = "請貼上 D1 資料庫 ID"
+
+# 檔案空間：先在 Cloudflare 主控台「R2 物件儲存」建立 pdf-editor-files
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "pdf-editor-files"
+
+[observability]
+enabled = true
+
+# 公開設定（不是祕密，可以放在 GitHub 上）。改這裡 → 推上 GitHub → 自動生效
+[vars]
+SITE_NAME = "PDF 線上編輯器"
+SITE_URL = ""                                   # 留空 = 自動用目前的網址。之後有自己的網域，填 "https://你的網域"
+FIREBASE_PROJECT_ID = "你的-firebase-專案-id"      # 跟 web/js/config.js 的 projectId 一樣
+SUPPORT_EMAIL = "你的客服信箱"
+
+# ===== 方案與價格（元、天數）=====
+# pro_days = 進階版天數；credits = 批次簽名份數；credit_days = 份數要在幾天內用完
+# pay = "Credit" 代表只收信用卡（小額方案用，ATM 每筆最低手續費 15 元不划算）
+PLANS = '{"pro_m":{"name":"進階版 1 個月","price":99,"pro_days":31,"pay":"Credit"},"pro_y":{"name":"進階版 1 年","price":790,"pro_days":366},"sign300":{"name":"批次簽名 300 份","price":390,"credits":300,"credit_days":365},"sign1000":{"name":"批次簽名 1,000 份＋進階版 1 年","price":990,"credits":1000,"credit_days":365,"pro_days":366},"sign3000":{"name":"批次簽名 3,000 份＋進階版 1 年","price":2490,"credits":3000,"credit_days":365,"pro_days":366}}'
+
+# ===== 免費試用 =====
+FREE_QUOTA = '{"ocr":10,"convert":10}'   # 每個月：掃描文字辨識、Word/Excel/PPT 轉檔各幾次（每月 1 日重算）
+FREE_DOC_CREDITS = "30"          # 每個帳號可以免費試用幾份批次簽名（一次性）
+FREE_MAX_BATCHES = "2"           # 試用時最多同時幾個批次
+FREE_RETAIN_DAYS = "14"          # 試用批次最多保存幾天（到期自動刪除）
+TRIAL_STORAGE_GUARD_GB = "8"     # 全站檔案超過這個 GB 數時，暫停「試用」上傳（付費照常）；0 = 不限制
+MAX_BATCH_DOCS = "3000"          # 一個批次最多幾份文件
+MAX_PDF_MB = "10"                # 每份 PDF 的大小上限
+MAX_RETAIN_DAYS = "180"          # 檔案最長保存天數
+R2_FREE_GB = "10"
+
+# 綠界：MerchantID 可以寫這裡；HashKey / HashIV 是祕密，到主控台設定（見下方）
+ECPAY_MERCHANT_ID = "3002607"     # 這是綠界公開的測試商店代號，正式上線改成你自己的
+ECPAY_STAGE = "on"               # on = 測試環境；正式收款時改成 off
+ECPAY_CHOOSE_PAYMENT = "ALL"     # 預設付款方式：ALL = 綠界頁面讓客人選（方案裡寫了 pay 的以方案為準）
+ECPAY_IGNORE_PAYMENT = "CVS#BARCODE"   # 不提供超商代碼／條碼（每筆固定 31／16 元，小額不划算）
+
+# 測試用的假登入。正式環境務必維持 off
+DEV_AUTH = "off"
+
+# 祕密不要寫在這裡！到 Cloudflare 主控台 → Workers 和 Pages → pdf-editor → 設定 → 變數和祕密 → 新增，類型選「祕密」：
+#   ECPAY_HASH_KEY、ECPAY_HASH_IV：綠界的 HashKey / HashIV
+#   SITE_ADMINS：可以看「網站用量監控」頁、手動開通的 Google 帳號 Email，多個用逗號分開
+# 祕密存在 Cloudflare 上，自動部署不會清掉它們。

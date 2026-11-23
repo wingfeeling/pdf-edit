@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>網站用量監控</title><link rel="stylesheet" href="css/site.css">
+<style>.meter{height:12px;background:#eef2ff;border-radius:8px;overflow:hidden;margin:6px 0 2px}.meter i{display:block;height:100%;background:var(--ok)}.meter i.w{background:var(--warn)}.meter i.d{background:var(--danger)}</style></head>
+<body>
+<div id="siteHeader"></div>
+<div class="wrap">
+  <h1>網站用量監控</h1>
+  <p class="sub">只有 <code>SITE_ADMINS</code> 裡的帳號看得到。請求次數、運算時間等數字請到 Cloudflare 後台的 Workers／D1／R2 頁面查看。</p>
+  <div id="warn"></div>
+  <div class="grid" id="cards"><div class="card muted">載入中…</div></div>
+  <div class="card" id="grant" style="display:none;margin-top:18px">
+    <h3>手動開通（學校匯款、開發票的訂單）</h3>
+    <p class="small muted">對方要先用這個 Google 帳號登入網站一次。開通紀錄會留在資料庫的 credit_log 表。</p>
+    <div class="grid">
+      <label class="f"><span>對方的 Google 帳號 Email</span><input type="email" id="gEmail" placeholder="teacher@school.edu.tw"></label>
+      <label class="f"><span>簽名份數</span><input type="number" id="gCredits" min="0" value="1000"></label>
+      <label class="f"><span>份數幾天內用完</span><input type="number" id="gDays" min="1" value="365"></label>
+      <label class="f"><span>進階版天數（0 = 不給）</span><input type="number" id="gPro" min="0" value="366"></label>
+    </div>
+    <label class="f"><span>備註（例如：○○高職 匯款 990 元，發票號碼）</span><input type="text" id="gNote"></label>
+    <button class="btn primary" id="gGo">開通</button><div id="gOut" style="margin-top:10px"></div>
+  </div>
+</div>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="js/config.js"></script><script src="js/app.js"></script>
+<script>
+App.header(''); const esc = App.esc;
+const meter = (v, max) => { const p = Math.min(100, v / max * 100); return `<div class="meter"><i class="${p > 90 ? 'd' : p > 70 ? 'w' : ''}" style="width:${p}%"></i></div><div class="small muted">${p.toFixed(1)}%</div>`; };
+const gb = b => (b / 1073741824).toFixed(2) + ' GB';
+(async () => {
+  await App.ready; if (!App.user) { cards.innerHTML = '<div class="card">請先登入</div>'; return; }
+  try {
+    const s = await App.api('/api/admin/stats');
+    warn.innerHTML = s.warnings.map(w => `<div class="notice warn">${esc(w)}</div>`).join('');
+    const NAMES = { ocr: '文字辨識', convert: 'Office 轉檔' };
+    cards.innerHTML = `
+    <div class="card"><h3>檔案空間（R2）</h3><b>${gb(s.files.bytes)}</b> / ${gb(s.files.limit_bytes)} 免費額度${meter(s.files.bytes, s.files.limit_bytes)}<div class="small muted">${s.files.docs} 份文件，${s.files.signed || 0} 份已簽，${s.batches.n} 個批次<br>其中免費試用占 ${gb(s.files.trial_bytes || 0)}；全站超過 ${gb(s.files.trial_guard_bytes)} 時暫停試用上傳${s.files.over_gb > 0 ? `<br>超出免費額度 ${s.files.over_gb.toFixed(1)} GB，約每月 US$ ${(Math.ceil(s.files.over_gb) * 0.015).toFixed(2)}` : ''}</div></div>
+    <div class="card"><h3>使用者</h3><b>${s.users.n || 0}</b> 位，進階版 ${s.users.paid || 0} 位，近 30 天活躍 ${s.users.active30 || 0} 位</div>
+    <div class="card"><h3>本月付款</h3><b>${s.sales_this_month.n}</b> 筆，NT$ ${s.sales_this_month.amount}<div class="small muted">尚未用掉的已售份數：${(s.credits.open_credits || 0).toLocaleString()} 份（${s.credits.buyers || 0} 位客戶）</div></div>
+    <div class="card"><h3>近 30 天功能使用</h3>${s.usage_30d.map(u => `${NAMES[u.feature] || u.feature}：<b>${u.n}</b> 次`).join('<br>') || '<span class="muted">沒有紀錄</span>'}</div>`;
+    grant.style.display = '';
+  } catch (e) { cards.innerHTML = `<div class="card">${esc(e.message)}</div>`; }
+})();
+document.getElementById('gGo').onclick = async () => {
+  const body = { email: gEmail.value, credits: gCredits.value, credit_days: gDays.value, pro_days: gPro.value, note: gNote.value };
+  if (!confirm(`確定要開通給 ${body.email}？\n份數 ${body.credits || 0}（${body.credit_days} 天內用完）、進階版 ${body.pro_days || 0} 天`)) return;
+  try { const r = await App.api('/api/admin/grant', { body }); gOut.innerHTML = `<div class="notice ok">已開通：${esc(r.account.email)} 現在有 ${r.account.credits.paid} 份${r.account.paid ? `，進階版到 ${App.fmtDate(r.account.paid_until)}` : ''}</div>`; }
+  catch (e) { gOut.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`; }
+};
+</script>
+</body></html>

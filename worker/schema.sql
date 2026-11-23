@@ -1,0 +1,78 @@
+-- PDF 線上編輯器 D1 資料表（參考用：後端第一次連線時會自動建立，不用手動執行）
+CREATE TABLE IF NOT EXISTS users (
+  uid TEXT PRIMARY KEY,
+  email TEXT,
+  name TEXT,
+  paid_until INTEGER,            -- 進階版到期時間（毫秒）
+  doc_credits INTEGER DEFAULT 0, -- 買來的批次簽名份數（剩下）
+  credits_until INTEGER,         -- 份數的使用期限（毫秒）
+  trial_docs INTEGER DEFAULT 0,  -- 已用掉的免費試用份數
+  created_at INTEGER,
+  last_seen INTEGER
+);
+CREATE TABLE IF NOT EXISTS usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT NOT NULL,
+  feature TEXT NOT NULL,         -- ocr / convert
+  trial INTEGER NOT NULL,        -- 1 = 扣每月免費次數, 0 = 進階版使用（只做統計）
+  created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_usage_uid ON usage(uid, feature, trial);
+CREATE INDEX IF NOT EXISTS idx_usage_time ON usage(created_at);
+
+CREATE TABLE IF NOT EXISTS batches (
+  id TEXT PRIMARY KEY,
+  owner_uid TEXT NOT NULL,
+  name TEXT,
+  org_name TEXT,
+  message TEXT,
+  deadline INTEGER,              -- 簽名截止（毫秒）
+  require_login INTEGER DEFAULT 1,
+  retain_until INTEGER,          -- 超過這個時間由排程自動刪除全部檔案
+  created_at INTEGER,
+  trial INTEGER DEFAULT 0,       -- 1 = 免費試用批次（保存天數較短）
+  warned INTEGER DEFAULT 0       -- （保留欄位，目前沒用到）
+);
+CREATE INDEX IF NOT EXISTS idx_batches_owner ON batches(owner_uid);
+CREATE INDEX IF NOT EXISTS idx_batches_retain ON batches(retain_until);
+
+CREATE TABLE IF NOT EXISTS docs (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  owner_uid TEXT NOT NULL,
+  filename TEXT,
+  student_id TEXT,
+  student_name TEXT,
+  email TEXT,
+  token TEXT UNIQUE NOT NULL,    -- 簽名網址裡的亂碼
+  status TEXT NOT NULL,          -- pending / sent / signed / returned
+  orig_key TEXT, orig_size INTEGER,
+  signed_key TEXT, signed_size INTEGER,
+  sent_at INTEGER, sent_count INTEGER DEFAULT 0,
+  signed_at INTEGER, signed_ip TEXT, signed_email TEXT,
+  return_reason TEXT,
+  created_at INTEGER,
+  credit TEXT                    -- 扣的是 trial 還是 paid 份數（還沒發出就刪除時退回）
+);
+CREATE INDEX IF NOT EXISTS idx_docs_batch ON docs(batch_id);
+
+
+CREATE TABLE IF NOT EXISTS orders (
+  trade_no TEXT PRIMARY KEY,
+  uid TEXT NOT NULL, email TEXT,
+  plan TEXT, amount INTEGER,
+  days INTEGER,                  -- 進階版天數
+  credits INTEGER DEFAULT 0,     -- 簽名份數
+  credit_days INTEGER DEFAULT 0, -- 份數使用期限（天）
+  status TEXT,                   -- created / paid / failed
+  created_at INTEGER, paid_at INTEGER,
+  ecpay_trade_no TEXT, payment_type TEXT, note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_orders_uid ON orders(uid);
+
+CREATE TABLE IF NOT EXISTS credit_log (   -- 每一次加份數／加天數的紀錄（付款或管理者手動開通）
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT NOT NULL, credits INTEGER, pro_days INTEGER,
+  reason TEXT, ref TEXT, created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_credit_uid ON credit_log(uid);

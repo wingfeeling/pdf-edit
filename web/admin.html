@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>批次線上簽名｜管理</title>
+<link rel="stylesheet" href="css/site.css">
+<style>
+.layout{display:grid;grid-template-columns:270px 1fr;gap:18px;align-items:start}
+@media(max-width:900px){.layout{grid-template-columns:1fr}}
+.blist a{display:block;padding:10px 12px;border-radius:10px;text-decoration:none;color:var(--text);border:1px solid transparent;margin-bottom:6px;background:#fff}
+.blist a.on{border-color:#c7d2fe;background:var(--accent-soft)}
+.blist a b{display:block;font-size:14px}.blist a span{font-size:12px;color:var(--muted)}
+.stats{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 14px}.stats div{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:6px 14px;font-size:13px}.stats b{font-size:18px;margin-right:4px}
+.tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+#tb td{white-space:nowrap}#tb td.fn{white-space:normal;min-width:190px;max-width:280px;word-break:break-all}#tb td.rs{white-space:normal;min-width:120px;max-width:200px}
+.tablebox table.t{min-width:1060px}
+.em{cursor:pointer;border-bottom:1px dashed #9ca3af}
+.bar{height:8px;background:#eef2ff;border-radius:6px;overflow:hidden;margin-top:8px}.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+.match-ok{color:var(--ok)}.match-no{color:var(--danger)}
+</style>
+</head>
+<body>
+<div id="siteHeader"></div>
+<div class="wrap">
+  <h1>批次線上簽名</h1>
+  <p class="sub">上傳報名表和學生名單，系統會產生每位學生專屬的簽名網址，你可以在這裡匯出「姓名、Email、簽名網址」名單，再用學校信箱、LINE 或聯絡簿發給學生。學生要用名單上的 Email 登入才能開啟，所以網址被別人點到也沒用。學生簽好回傳後就會鎖定，你可以在這裡查看、退回重簽、一次下載全部已簽檔案。</p>
+  <div id="needLogin" class="card" style="display:none"><h3>請先登入</h3><p class="muted">批次簽名的資料只有你自己看得到，請用 Google 帳號登入。</p><button class="btn primary" id="btnLogin">用 Google 登入</button></div>
+  <div id="main" class="layout" style="display:none">
+    <aside>
+      <button class="btn primary" id="btnNew" style="width:100%;margin-bottom:12px">＋ 新增批次</button>
+      <div class="blist" id="blist"></div>
+      <div class="card small muted" id="quotaBox" style="margin-top:12px"></div>
+    </aside>
+    <section id="detail"><div class="card muted">請在左邊選一個批次，或按「新增批次」。</div></section>
+  </div>
+</div>
+<div class="modal" id="modal"><div class="box" id="mbox"></div></div>
+<div id="toast"></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+<script>
+'use strict';
+const $ = s => document.querySelector(s), esc = App.esc;
+App.header('admin.html');
+const ST = { pending: '未發出', sent: '已發出', signed: '已簽', returned: '退回重簽' };
+let cfg = {}, me = null, batches = [], cur = null, curDocs = [], docLimit = 0;
+let tT; function toast(m, ms = 4000) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(tT); tT = setTimeout(() => t.classList.remove('on'), ms); }
+function modal(h) { $('#mbox').innerHTML = h; $('#modal').classList.add('on'); }
+function closeModal() { $('#modal').classList.remove('on'); }
+$('#modal').addEventListener('pointerdown', e => { if (e.target.id === 'modal' && !$('#modal').dataset.lock) closeModal(); });
+const dateIn = ms => ms ? new Date(ms - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10) : '';
+const dateOut = s => s ? new Date(s + 'T23:59:59').getTime() : null;
+
+async function init() {
+  await App.ready;
+  if (!App.user) { $('#needLogin').style.display = ''; $('#btnLogin').onclick = () => App.signIn().then(() => location.reload()).catch(e => toast(e.message)); return; }
+  $('#main').style.display = '';
+  try { cfg = await App.api('/api/config'); me = await App.api('/api/me'); } catch (e) { toast(e.message, 8000); return; }
+  showQuota(); await loadBatches();
+  const want = new URLSearchParams(location.search).get('b') || (batches[0] && batches[0].id);
+  if (want) openBatch(want);
+}
+async function refreshMe() { try { me = await App.api('/api/me'); showQuota(); } catch (e) { } }
+function showQuota() {
+  const c = me.credits;
+  $('#quotaBox').innerHTML = (c.paid ? `簽名份數：剩 <b>${c.paid.toLocaleString()}</b> 份（${App.fmtDate(c.paid_until)} 前用完）` : `免費試用：還剩 <b>${c.trial}</b> 份（試用批次保存 ${cfg.free_retain_days} 天）`) + `<br><a href="pricing.html">${c.paid ? '加購份數' : '購買份數'}</a>`;
+}
+async function loadBatches() {
+  batches = (await App.api('/api/batches')).batches;
+  $('#blist').innerHTML = batches.map(b => `<a href="?b=${b.id}" data-id="${b.id}" class="${cur && cur.id === b.id ? 'on' : ''}"><b>${esc(b.name)}</b><span>${b.signed || 0} / ${b.total || 0} 已簽・${App.fmtDate(b.created_at)}</span></a>`).join('') || '<p class="muted small">還沒有批次</p>';
+  document.querySelectorAll('#blist a').forEach(a => a.onclick = e => { e.preventDefault(); history.replaceState(null, '', '?b=' + a.dataset.id); openBatch(a.dataset.id); });
+}
+async function openBatch(id) {
+  try { const r = await App.api('/api/batches/' + id); cur = r.batch; curDocs = r.docs; docLimit = r.doc_limit; }
+  catch (e) { toast(e.message); return; }
+  document.querySelectorAll('#blist a').forEach(a => a.classList.toggle('on', a.dataset.id === id));
+  renderDetail();
+}
+function counts() { const c = { total: curDocs.length, pending: 0, sent: 0, signed: 0, returned: 0 }; curDocs.forEach(d => c[d.status]++); return c; }
+function renderDetail() {
+  const b = cur, c = counts();
+  $('#detail').innerHTML = `<div class="card">
+    <div class="row" style="justify-content:space-between"><div><h3 style="margin:0">${esc(b.name)}</h3><div class="small muted">${esc(b.org_name || '')}${b.deadline ? `・簽名截止 ${App.fmtDate(b.deadline)}` : ''}・資料保存到 ${App.fmtDate(b.retain_until)}（之後自動刪除）・${b.require_login ? '學生需用本人 Google 帳號登入' : '持有網址即可簽名'}</div></div>
+      <div class="row"><button class="btn sm" id="bSet">批次設定</button><button class="btn sm danger" id="bDelB">刪除整批</button></div></div>
+    <div class="stats"><div><b>${c.total}</b>份</div><div><b>${c.pending}</b>未發出</div><div><b>${c.sent}</b>已發出未簽</div><div style="background:#ecfdf5"><b>${c.signed}</b>已簽</div><div><b>${c.returned}</b>退回重簽</div></div>
+    ${b.retain_until - Date.now() < 7 * 864e5 ? `<div class="notice warn small">這個批次會在 ${App.fmtDate(b.retain_until)} 自動刪除，需要留存請先按「下載全部已簽檔案」。</div>` : ''}
+    <div class="tools">
+      <button class="btn primary" id="bUp">上傳報名表／名單</button>
+      <button class="btn" id="bList">姓名・Email・簽名網址名單</button>
+      <button class="btn" id="bMark">把勾選的人標記為已發出</button>
+      <button class="btn" id="bZip" ${c.signed ? '' : 'disabled'}>下載全部已簽檔案（ZIP）</button>
+    </div>
+    <div class="row small" style="margin-bottom:8px"><label><input type="checkbox" id="chkAll"> 全選</label><span class="muted">篩選：</span>
+      <select id="flt" style="width:auto"><option value="">全部</option><option value="pending">未發出</option><option value="sent">已發出未簽</option><option value="signed">已簽</option><option value="returned">退回重簽</option><option value="noemail">沒有 Email</option></select>
+      <input type="text" id="q" placeholder="搜尋檔名、學號、姓名、Email" style="width:220px"></div>
+    <div class="tablebox"><table class="t"><thead><tr><th></th><th>檔名</th><th>學號</th><th>姓名</th><th>Email</th><th>簽名網址</th><th>狀態</th><th>發出時間</th><th>已簽檔案</th><th>操作</th></tr></thead><tbody id="tb"></tbody></table></div>
+  </div>`;
+  $('#bSet').onclick = batchSettings; $('#bDelB').onclick = delBatch; $('#bUp').onclick = uploadDialog;
+  $('#bList').onclick = listDialog; $('#bZip').onclick = zipSigned; $('#bMark').onclick = markSent;
+  $('#flt').onchange = $('#q').oninput = renderRows;
+  $('#chkAll').onchange = e => { document.querySelectorAll('#tb input[type=checkbox]').forEach(x => x.checked = e.target.checked); };
+  renderRows();
+}
+function selected() { const ids = new Set([...document.querySelectorAll('#tb input[type=checkbox]:checked')].map(x => x.dataset.id)); return curDocs.filter(d => ids.has(d.id)); }
+function renderRows() {
+  const f = $('#flt').value, q = $('#q').value.trim().toLowerCase();
+  const rows = curDocs.filter(d => (!f || (f === 'noemail' ? !d.email : d.status === f)) && (!q || [d.filename, d.student_id, d.student_name, d.email].join(' ').toLowerCase().includes(q)));
+  $('#tb').innerHTML = rows.map(d => `<tr>
+    <td><input type="checkbox" data-id="${d.id}"></td>
+    <td class="fn"><a href="#" data-open="${d.id}">${esc(d.filename)}</a></td>
+    <td>${esc(d.student_id)}</td><td>${esc(d.student_name)}</td>
+    <td><span class="em" data-em="${d.id}" title="點一下修改">${esc(d.email) || '<span class="match-no">（未填，點此填寫）</span>'}</span></td>
+    <td class="url"><button class="btn sm" data-copy="${esc(d.sign_url)}">複製網址</button></td>
+    <td><span class="pill st-${d.status}">${ST[d.status]}</span></td>
+    <td class="small muted">${d.sent_at ? App.fmtDate(d.sent_at, 1) : '—'}</td>
+    <td class="rs">${d.status === 'signed' ? `<a href="#" data-signed="${d.id}">${esc(d.filename.replace(/(\.pdf)?$/i, '(已簽).pdf'))}</a><div class="small muted">${App.fmtDate(d.signed_at, 1)}</div>` : (d.status === 'returned' && d.return_reason ? `<span class="small muted">退回：${esc(d.return_reason)}</span>` : '—')}</td>
+    <td class="row" style="gap:4px;flex-wrap:nowrap">${d.status === 'signed' ? `<button class="btn sm" data-ret="${d.id}">退回重簽</button>` : ''}<button class="btn sm danger" data-del="${d.id}" title="刪除這份">✕</button></td></tr>`).join('') || `<tr><td colspan="10" class="muted" style="text-align:center;padding:30px">${curDocs.length ? '沒有符合的資料' : '還沒有文件，請按「上傳報名表／名單」'}</td></tr>`;
+  $('#tb').onclick = async e => {
+    const t = e.target.closest('[data-open],[data-signed],[data-copy],[data-ret],[data-del],[data-em]'); if (!t) return; e.preventDefault();
+    if (t.dataset.open) openFile(t.dataset.open, false);
+    else if (t.dataset.signed) openFile(t.dataset.signed, true);
+    else if (t.dataset.copy) { await navigator.clipboard.writeText(t.dataset.copy); toast('已複製簽名網址'); }
+    else if (t.dataset.ret) returnDialog(curDocs.find(d => d.id === t.dataset.ret));
+    else if (t.dataset.del) { const d = curDocs.find(x => x.id === t.dataset.del); if (!confirm(`確定刪除「${d.filename}」？原檔和已簽檔都會刪除，簽名網址也會失效。`)) return; const rr = await App.api('/api/docs/' + d.id, { method: 'DELETE' }); curDocs = curDocs.filter(x => x !== d); await refreshMe(); await openBatch(cur.id); loadBatches(); if (rr.refunded) toast('已刪除，這份還沒發出，份數已退回'); }
+    else if (t.dataset.em) { const d = curDocs.find(x => x.id === t.dataset.em); const v = prompt('學生的 Email（學生要用這個 Google 帳號登入簽名）', d.email || ''); if (v == null) return; try { const r = await App.api('/api/docs/' + d.id, { method: 'PATCH', body: { email: v.trim() } }); Object.assign(d, r.doc); renderRows(); } catch (er) { toast(er.message); } }
+  };
+}
+async function openFile(id, signed) {
+  const w = window.open('', '_blank'); if (w) w.document.write('<p style="font-family:sans-serif">開啟中…</p>');
+  try { const r = await App.api(`/api/docs/${id}/file${signed ? '?v=signed' : ''}`, { raw: true }); const u = URL.createObjectURL(await r.blob()); if (w) w.location.href = u; else location.href = u; }
+  catch (e) { if (w) w.close(); toast(e.message); }
+}
+/* ---------- 新增 / 設定批次 ---------- */
+function batchForm(b) {
+  const keep = b ? b.retain_until : Date.now() + (me && me.credits.paid ? 90 : cfg.free_retain_days || 14) * 864e5;
+  return `<label class="f"><span>批次名稱</span><input type="text" id="fName" value="${esc(b ? b.name : '')}" placeholder="例如：114 統測報名表簽名"></label>
+  <label class="f"><span>學校／單位名稱（會出現在簽名頁上）</span><input type="text" id="fOrg" value="${esc(b ? b.org_name : '')}" placeholder="例如：○○高職 註冊組"></label>
+  <div class="grid"><label class="f"><span>簽名截止日</span><input type="date" id="fDl" value="${dateIn(b && b.deadline)}"></label>
+  <label class="f"><span>資料保存到（之後自動刪除）</span><input type="date" id="fKeep" value="${dateIn(keep)}" ${b ? 'disabled' : ''}></label></div>
+  <label class="f"><span>給學生的說明（選填，會出現在簽名頁上）</span><textarea id="fMsg" placeholder="例如：請確認報名表資料正確後簽名，有錯誤請先到註冊組更正。">${esc(b ? b.message : '')}</textarea></label>
+  <label class="row small"><input type="checkbox" id="fLogin" ${!b || b.require_login ? 'checked' : ''}> 學生必須用名單上的 Google 帳號登入才能看到文件（建議開啟，網址被轉傳也不會外流）</label>`;
+}
+function newBatch() {
+  modal(`<h3>新增批次</h3>${batchForm(null)}<div class="notice info small">${me.credits.paid ? `目前有 ${me.credits.paid.toLocaleString()} 份可以用，資料最長可保存 ${cfg.max_retain_days} 天。` : `免費試用還剩 ${me.credits.trial} 份；試用批次最長保存 ${cfg.free_retain_days} 天，同時最多 ${cfg.free_max_batches} 個。`}每上傳一份文件扣 1 份；還沒發出（沒有匯出名單、也沒標記已發出）就刪除會退回。</div><div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="fGo">建立</button></div>`);
+  $('#fGo').onclick = async () => {
+    try { const r = await App.api('/api/batches', { body: { name: $('#fName').value, org_name: $('#fOrg').value, deadline: dateOut($('#fDl').value), retain_until: dateOut($('#fKeep').value), message: $('#fMsg').value, require_login: $('#fLogin').checked } });
+      closeModal(); me = await App.api('/api/me'); showQuota(); await loadBatches(); history.replaceState(null, '', '?b=' + r.id); openBatch(r.id); }
+    catch (e) { if (e.status === 402) { if (confirm(e.message + '\n\n要去看方案嗎？')) location.href = 'pricing.html'; } else toast(e.message); }
+  };
+}
+$('#btnNew').onclick = newBatch;
+function batchSettings() {
+  modal(`<h3>批次設定</h3>${batchForm(cur)}<div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="fGo">儲存</button></div>`);
+  $('#fGo').onclick = async () => { try { await App.api('/api/batches/' + cur.id, { method: 'PATCH', body: { name: $('#fName').value, org_name: $('#fOrg').value, deadline: dateOut($('#fDl').value), message: $('#fMsg').value, require_login: $('#fLogin').checked } }); closeModal(); await loadBatches(); openBatch(cur.id); toast('已儲存'); } catch (e) { toast(e.message); } };
+}
+async function delBatch() {
+  if (prompt(`刪除後，這個批次的所有原檔、已簽檔和簽名網址都會永久刪除。\n確定要刪除請輸入批次名稱：「${cur.name}」`) !== cur.name) return;
+  const rr = await App.api('/api/batches/' + cur.id, { method: 'DELETE' }); cur = null; await refreshMe(); if (rr.refunded) toast(`已退回 ${rr.refunded} 份還沒發出的份數`); history.replaceState(null, '', 'admin.html'); await loadBatches(); $('#detail').innerHTML = '<div class="card muted">已刪除。</div>';
+}
+/* ---------- 上傳報名表與名單 ---------- */
+let upFiles = [], roster = null;
+const baseName = s => String(s || '').replace(/\.pdf$/i, '').trim().toLowerCase();
+function parseRoster(rows) {
+  let hi = rows.findIndex(r => r.some(c => /email|e-mail|信箱|電子郵件|mail/i.test(String(c))));
+  if (hi < 0) return { error: '名單裡找不到 Email 欄位（第一列要有「Email」或「電子郵件」標題）' };
+  const head = rows[hi].map(c => String(c).trim());
+  const col = re => head.findIndex(h => re.test(h));
+  const ci = { email: col(/email|e-mail|信箱|電子郵件|mail/i), file: col(/檔名|檔案|file/i), sid: col(/學號|准考證|座號|編號|id/i), name: col(/姓名|名字|name/i) };
+  const list = rows.slice(hi + 1).map(r => ({ email: String(r[ci.email] ?? '').trim(), file: ci.file >= 0 ? String(r[ci.file] ?? '').trim() : '', sid: ci.sid >= 0 ? String(r[ci.sid] ?? '').trim() : '', name: ci.name >= 0 ? String(r[ci.name] ?? '').trim() : '' })).filter(x => x.email || x.sid || x.file);
+  return { list, ci };
+}
+function matchAll() {
+  return upFiles.map(f => {
+    let m = null, how = '';
+    if (roster) {
+      const bn = baseName(f.name);
+      m = roster.list.find(r => r.file && baseName(r.file) === bn); if (m) how = '檔名';
+      if (!m) { const cands = roster.list.filter(r => r.sid && new RegExp(`(^|[^0-9A-Za-z])${r.sid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^0-9A-Za-z]|$)`, 'i').test(f.name)); if (cands.length === 1) { m = cands[0]; how = '學號'; } }
+      if (!m) { const cands = roster.list.filter(r => r.name && r.name.length >= 2 && f.name.includes(r.name)); if (cands.length === 1) { m = cands[0]; how = '姓名'; } }
+    }
+    return { file: f, email: m ? m.email : '', sid: m ? m.sid : '', name: m ? m.name : '', how };
+  });
+}
+function uploadDialog() {
+  upFiles = []; roster = null;
+  modal(`<h3>上傳報名表與名單</h3>
+  <div class="grid"><div><b class="small">① 報名表 PDF（可一次選很多個）</b><div class="drop" id="dPdf" style="margin-top:6px">把 PDF 拖到這裡，或點一下選擇<br><span class="small muted" id="nPdf">尚未選擇</span></div></div>
+  <div><b class="small">② 學生名單 Excel／CSV（選填）</b><div class="drop" id="dRos" style="margin-top:6px">需要有 Email 欄，並有「檔名」或「學號」或「姓名」欄用來對應<br><span class="small muted" id="nRos">尚未選擇</span></div></div></div>
+  <div class="notice info small">對應規則：名單的「檔名」跟 PDF 檔名一樣 → 用檔名對應；不然就找 PDF 檔名裡有沒有該生的「學號」；再不然找「姓名」。對應不到的可以在下表直接填 Email。</div>
+  <div id="pv"></div>
+  <div class="bar" id="upBar" style="display:none"><i></i></div>
+  <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" id="upCancel">取消</button><button class="btn primary" id="upGo" disabled>上傳</button></div>
+  <input type="file" id="iPdf" accept="application/pdf,.pdf" multiple hidden><input type="file" id="iRos" accept=".xlsx,.xls,.csv" hidden>`);
+  const bindDrop = (el, input, fn) => { el.onclick = () => input.click(); input.onchange = () => fn([...input.files]); el.ondragover = e => { e.preventDefault(); el.classList.add('over'); }; el.ondragleave = () => el.classList.remove('over'); el.ondrop = e => { e.preventDefault(); el.classList.remove('over'); fn([...e.dataTransfer.files]); }; };
+  bindDrop($('#dPdf'), $('#iPdf'), fs => { upFiles = upFiles.concat(fs.filter(f => /\.pdf$/i.test(f.name))); $('#nPdf').textContent = `已選 ${upFiles.length} 個 PDF`; preview(); });
+  bindDrop($('#dRos'), $('#iRos'), async fs => {
+    const f = fs[0]; if (!f) return;
+    try { const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' }); const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false, defval: '' });
+      const r = parseRoster(rows); if (r.error) { toast(r.error, 7000); return; } roster = r; $('#nRos').textContent = `${f.name}：${r.list.length} 位學生`; preview(); }
+    catch (e) { toast('讀不到名單：' + e.message); }
+  });
+  $('#upCancel').onclick = closeModal; $('#upGo').onclick = doUpload;
+}
+let plan = [];
+function preview() {
+  plan = matchAll(); const ok = plan.filter(p => p.email).length;
+  const room = docLimit - curDocs.length;
+  $('#pv').innerHTML = plan.length ? `<p class="small">共 ${plan.length} 份，<span class="match-ok">${ok} 份已對應到 Email</span>${plan.length - ok ? `，<span class="match-no">${plan.length - ok} 份還沒有 Email</span>（可先上傳，之後再補）` : ''}${plan.length > room ? `<br><span class="match-no">你的份數還能上傳 ${Math.max(0, room)} 份，超過的不會上傳。<a href="pricing.html" target="_blank">購買份數</a></span>` : ''}</p>
+  <div class="tablebox" style="max-height:260px"><table class="t"><thead><tr><th>PDF 檔名</th><th>學號</th><th>姓名</th><th>Email</th><th>對應方式</th></tr></thead><tbody>
+  ${plan.map((p, i) => `<tr><td>${esc(p.file.name)}</td><td>${esc(p.sid)}</td><td>${esc(p.name)}</td><td><input type="email" data-i="${i}" value="${esc(p.email)}" placeholder="填入 Email" style="min-width:200px"></td><td class="small ${p.how ? 'match-ok' : 'match-no'}">${p.how || '未對應'}</td></tr>`).join('')}</tbody></table></div>` : '';
+  $('#pv').oninput = e => { const i = e.target.dataset.i; if (i != null) plan[i].email = e.target.value.trim(); };
+  $('#upGo').disabled = !plan.length;
+}
+async function doUpload() {
+  const room = docLimit - curDocs.length; const list = plan.slice(0, Math.max(0, room));
+  $('#upGo').disabled = true; $('#upCancel').disabled = true; $('#modal').dataset.lock = 1; $('#upBar').style.display = '';
+  let done = 0, fail = []; const q = list.slice();
+  const worker = async () => { while (q.length) { const p = q.shift();
+    try { const r = await App.api(`/api/batches/${cur.id}/docs`, { body: p.file, headers: { 'Content-Type': 'application/pdf', 'X-Meta': encodeURIComponent(JSON.stringify({ filename: p.file.name, email: p.email, student_id: p.sid, student_name: p.name })) } }); curDocs.push(r.doc); }
+    catch (e) { fail.push(`${p.file.name}：${e.message}`); if (e.status === 402 || e.status === 503) q.length = 0; }
+    done++; $('#upBar i').style.width = (done / list.length * 100) + '%'; } };
+  await Promise.all([worker(), worker(), worker()]);
+  delete $('#modal').dataset.lock; closeModal(); await refreshMe(); await loadBatches(); await openBatch(cur.id);
+  toast(fail.length ? `上傳完成，${fail.length} 份失敗：${fail.slice(0, 3).join('；')}` : `已上傳 ${done} 份`, fail.length ? 10000 : 4000);
+}
+/* ---------- 姓名・Email・簽名網址名單（不寄信，自己用學校信箱、LINE 等發出） ---------- */
+async function markSentIds(ids) {
+  ids = ids.filter(id => { const d = curDocs.find(x => x.id === id); return d && d.status === 'pending'; });
+  if (!ids.length) return 0;
+  for (let i = 0; i < ids.length; i += 500) await App.api(`/api/batches/${cur.id}/mark-sent`, { body: { ids: ids.slice(i, i + 500) } });
+  return ids.length;
+}
+async function markSent() {
+  const l = selected(); if (!l.length) return toast('請先勾選');
+  try { await App.api(`/api/batches/${cur.id}/mark-sent`, { body: { ids: l.map(d => d.id) } }); await openBatch(cur.id); loadBatches(); toast(`已把 ${l.length} 位標記為已發出`); } catch (e) { toast(e.message); }
+}
+function listDialog() {
+  const sel = selected();
+  const scopes = { unsigned: ['還沒簽的人', d => d.status !== 'signed'], pending: ['還沒發出的人', d => d.status === 'pending'], all: ['全部', () => true] };
+  if (sel.length) scopes.sel = [`勾選的 ${sel.length} 人`, d => sel.includes(d)];
+  let scope = sel.length ? 'sel' : 'unsigned', rows = [];
+  modal(`<h3>姓名・Email・簽名網址名單</h3>
+  <p class="small muted">複製後可以貼到 Excel、Google 試算表，或用 Gmail「合併列印」、學校信箱、LINE 發給學生。學生要用自己那一列的 Email 登入才打得開，別人點到也看不到。</p>
+  <div class="row small" style="gap:6px;flex-wrap:wrap" id="lsc">${Object.entries(scopes).map(([k, v]) => `<label style="margin-right:10px"><input type="radio" name="lsc" value="${k}" ${k === scope ? 'checked' : ''}> ${v[0]}</label>`).join('')}</div>
+  <div class="tablebox" style="max-height:300px;margin-top:8px"><table class="t"><thead><tr><th>姓名</th><th>Email</th><th>簽名網址</th><th></th></tr></thead><tbody id="ltb"></tbody></table></div>
+  <p class="small muted" id="lnote"></p>
+  <label class="row small"><input type="checkbox" id="lmark" checked> 複製或下載後，把這些人標記為「已發出」（已發出的文件刪除時不退份數）</label>
+  <div class="row" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap"><button class="btn" onclick="closeModal()">關閉</button><button class="btn" id="lCsv">下載 CSV（Excel 可開）</button><button class="btn primary" id="lCopy">複製整張表</button></div>`);
+  const draw = () => {
+    rows = curDocs.filter(scopes[scope][1]);
+    $('#ltb').innerHTML = rows.map(d => `<tr><td>${esc(d.student_name) || '<span class="muted">（未填）</span>'}</td><td>${esc(d.email) || '<span class="match-no">（沒有 Email）</span>'}</td><td style="max-width:320px;overflow:hidden;text-overflow:ellipsis"><a href="${esc(d.sign_url)}" target="_blank" rel="noopener">${esc(d.sign_url)}</a></td><td><button class="btn sm" data-c="${esc(d.sign_url)}">複製</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted" style="text-align:center;padding:20px">沒有資料</td></tr>';
+    const noMail = rows.filter(d => !d.email).length;
+    $('#lnote').innerHTML = `共 ${rows.length} 人${noMail ? `，<span class="match-no">${noMail} 人沒有 Email（他們會打不開，請先在表格裡補上）</span>` : ''}`;
+    $('#lCopy').disabled = $('#lCsv').disabled = !rows.length;
+  };
+  $('#lsc').onchange = e => { scope = e.target.value; draw(); };
+  $('#ltb').onclick = async e => { const b = e.target.closest('[data-c]'); if (!b) return; await navigator.clipboard.writeText(b.dataset.c); toast('已複製這個網址'); };
+  const after = async (msg) => {
+    let n = 0; if ($('#lmark').checked) { try { n = await markSentIds(rows.map(d => d.id)); } catch (e) { toast(e.message); return; } }
+    closeModal(); if (n) { await openBatch(cur.id); loadBatches(); }
+    toast(msg + (n ? `，並把 ${n} 位標記為已發出` : ''), 6000);
+  };
+  $('#lCopy').onclick = async () => {
+    const tsv = [['姓名', 'Email', '簽名網址']].concat(rows.map(d => [d.student_name, d.email, d.sign_url])).map(r => r.map(v => String(v ?? '').replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\n');
+    try { await navigator.clipboard.writeText(tsv); } catch (e) { return toast('瀏覽器不允許複製，請改按「下載 CSV」'); }
+    after(`已複製 ${rows.length} 人，可以直接貼到 Excel 或 Google 試算表`);
+  };
+  $('#lCsv').onclick = () => {
+    const out = [['姓名', 'Email', '簽名網址', '學號', '檔名', '狀態']].concat(rows.map(d => [d.student_name, d.email, d.sign_url, d.student_id, d.filename, ST[d.status]]));
+    const csv = '﻿' + out.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = `${cur.name}-簽名名單.csv`; a.click();
+    after(`已下載 ${rows.length} 人的名單`);
+  };
+  draw();
+}
+async function zipSigned() {
+  const l = curDocs.filter(d => d.status === 'signed'); if (!l.length) return;
+  modal(`<h3>打包已簽檔案中…</h3><p class="small muted" id="zm">0 / ${l.length}</p><div class="bar"><i id="zb"></i></div>`); $('#modal').dataset.lock = 1;
+  const z = new JSZip(); const used = {}; let n = 0;
+  const q = l.slice(); const fail = [];
+  const worker = async () => { while (q.length) { const d = q.shift();
+    try { const r = await App.api(`/api/docs/${d.id}/file?v=signed&dl=1`, { raw: true }); let nm = d.filename.replace(/(\.pdf)?$/i, '(已簽).pdf'); if (used[nm]) nm = nm.replace(/\.pdf$/, `-${++used[nm]}.pdf`); else used[nm] = 1; z.file(nm, await r.arrayBuffer()); }
+    catch (e) { fail.push(d.filename); }
+    n++; $('#zm').textContent = `${n} / ${l.length}`; $('#zb').style.width = (n / l.length * 100) + '%'; } };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  const blob = await z.generateAsync({ type: 'blob' }); delete $('#modal').dataset.lock; closeModal();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${cur.name}-已簽.zip`; a.click();
+  toast(fail.length ? `已下載，${fail.length} 份讀取失敗` : `已下載 ${l.length} 份已簽檔案`);
+}
+function returnDialog(d) {
+  modal(`<h3>退回重簽：${esc(d.filename)}</h3><p class="small muted">退回後，學生的簽名檔會刪除，學生可以用同一個網址重新簽名（網頁不會寄信，退回後請自己通知學生）。</p>
+  <label class="f"><span>退回原因（學生看得到）</span><textarea id="rr" placeholder="例如：簽名超出欄位，請簽在「考生簽名」框內"></textarea></label>
+  <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="rGo">退回</button></div>`);
+  $('#rGo').onclick = async () => { try { const r = await App.api(`/api/docs/${d.id}/return`, { body: { reason: $('#rr').value } }); await openBatch(cur.id); loadBatches();
+      modal(`<h3>已退回</h3><p>請通知 <b>${esc(d.student_name || d.email || '學生')}</b> 用同一個網址重新簽名：</p><p class="small" style="word-break:break-all;background:#f8fafc;padding:8px 10px;border-radius:8px">${esc(d.email)}<br>${esc(r.sign_url || d.sign_url)}</p><div class="row" style="justify-content:flex-end;gap:8px"><button class="btn" onclick="closeModal()">關閉</button><button class="btn primary" id="rCp">複製 Email 和網址</button></div>`);
+      $('#rCp').onclick = async () => { await navigator.clipboard.writeText(`${d.student_name || ''}	${d.email || ''}	${r.sign_url || d.sign_url}`); toast('已複製'); }; } catch (e) { toast(e.message); } };
+}
+init();
+</script>
+</body>
+</html>
