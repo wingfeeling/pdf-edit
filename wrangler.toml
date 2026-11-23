@@ -23,10 +23,11 @@ binding = "DB"
 database_name = "pdf-editor-db"
 database_id = "de0a56fd-abff-47a5-8010-658d9a357b8e"
 
-# 檔案空間：先在 Cloudflare 主控台「R2 物件儲存」建立 pdf-editor-files
-[[r2_buckets]]
-binding = "FILES"
-bucket_name = "pdf-editor-files"
+# 檔案空間：PDF 直接存在上面的 D1 資料庫裡，不用 R2，所以不用綁信用卡。
+# （以後網站變大、願意綁卡用 R2 時，把下面四行最前面的 # 拿掉，並在 R2 建立 pdf-editor-files 貯體，就會自動改用 R2）
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "pdf-editor-files"
 
 [observability]
 enabled = true
@@ -35,7 +36,7 @@ enabled = true
 [vars]
 SITE_NAME = "PDF 線上編輯器"
 SITE_URL = ""                                   # 留空 = 自動用目前的網址。之後有自己的網域，填 "https://你的網域"
-FIREBASE_PROJECT_ID = "pdf-editor-54ab7"      # 跟 web/js/config.js 的 projectId 一樣
+FIREBASE_PROJECT_ID = "pdf-editor-54ab7"   # 跟 web/js/config.js 的 projectId 一樣
 SUPPORT_EMAIL = "你的客服信箱"
 
 # ===== 方案與價格（元、天數）=====
@@ -48,11 +49,13 @@ FREE_QUOTA = '{"ocr":10,"convert":10}'   # 每個月：掃描文字辨識、Word
 FREE_DOC_CREDITS = "30"          # 每個帳號可以免費試用幾份批次簽名（一次性）
 FREE_MAX_BATCHES = "2"           # 試用時最多同時幾個批次
 FREE_RETAIN_DAYS = "14"          # 試用批次最多保存幾天（到期自動刪除）
-TRIAL_STORAGE_GUARD_GB = "8"     # 全站檔案超過這個 GB 數時，暫停「試用」上傳（付費照常）；0 = 不限制
+TRIAL_STORAGE_GUARD_GB = "8"     # （改用 R2 時才有用）全站檔案超過這個 GB 數時，暫停「試用」上傳（付費照常）；0 = 不限制
 MAX_BATCH_DOCS = "3000"          # 一個批次最多幾份文件
 MAX_PDF_MB = "10"                # 每份 PDF 的大小上限
 MAX_RETAIN_DAYS = "180"          # 檔案最長保存天數
-R2_FREE_GB = "10"
+D1_FILE_LIMIT_MB = "450"         # 檔案存在 D1 時的總上限（D1 免費版每個資料庫最大 500 MB，留一點給其他資料）。滿了就不能再上傳
+D1_TRIAL_GUARD_MB = "300"        # 檔案存在 D1 時，超過這個 MB 數就暫停「試用」上傳（付費照常）
+R2_FREE_GB = "10"                # （改用 R2 時才有用）
 
 # 綠界：MerchantID 可以寫這裡；HashKey / HashIV 是祕密，到主控台設定（見下方）
 ECPAY_MERCHANT_ID = "3002607"     # 這是綠界公開的測試商店代號，正式上線改成你自己的
