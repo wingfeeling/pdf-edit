@@ -82,11 +82,20 @@ async function authUser(req, env, required = true) {
   const token = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
   if (!token) { if (required) throw new HttpError(401, '請先用 Google 帳號登入', { need_login: true }); return null; }
   const u = await verifyIdToken(token, env);
-  await env.DB.prepare('INSERT INTO users (uid, email, name, created_at, last_seen) VALUES (?1, ?2, ?3, ?4, ?4) ON CONFLICT(uid) DO NOTHING')
+  const ins = await env.DB.prepare('INSERT INTO users (uid, email, name, created_at, last_seen) VALUES (?1, ?2, ?3, ?4, ?4) ON CONFLICT(uid) DO NOTHING')
     .bind(u.uid, u.email, u.name, now()).run();
+  if (ins.meta.changes && u.email) await applyPendingGrants(env, u);   // 第一次登入：把管理者事先開通給這個 Email 的權限加上去
   return u;
 }
-const isSiteAdmin = (u, env) => !!u && (env.SITE_ADMINS || '').split(',').map(normEmail).includes(u.email);
+async function applyPendingGrants(env, u) {
+  const { results } = await env.DB.prepare('SELECT * FROM pending_grants WHERE email = ? AND applied_at IS NULL').bind(u.email).all();
+  for (const g of results) {
+    const r = await env.DB.prepare('UPDATE pending_grants SET applied_at = ?, uid = ? WHERE id = ? AND applied_at IS NULL').bind(now(), u.uid, g.id).run();
+    if (r.meta.changes) await env.DB.batch(grantStmts(env, u.uid, { pro_days: g.pro_days, credits: g.credits, credit_days: g.credit_days }, g.reason, g.note));
+  }
+}
+const adminList = env => [env.SITE_ADMINS, env.OWNER_EMAILS].join(',').split(',').map(normEmail).filter(Boolean);
+const isSiteAdmin = (u, env) => !!u && !!u.email && u.email_verified !== false && adminList(env).includes(u.email);
 
 /* ============================== 方案、簽名份數與試用 ==============================
  * 兩種商品：
@@ -96,12 +105,13 @@ const isSiteAdmin = (u, env) => !!u && (env.SITE_ADMINS || '').split(',').map(no
  *  還沒寄出就刪掉的文件會把份數還回去。
  */
 const DEFAULT_PLANS = {
-  pro_m: { name: '進階版 1 個月', price: 99, pro_days: 31, pay: 'Credit' },
-  pro_y: { name: '進階版 1 年', price: 790, pro_days: 366 },
-  sign300: { name: '批次簽名 300 份', price: 390, credits: 300, credit_days: 365 },
-  sign1000: { name: '批次簽名 1,000 份＋進階版 1 年', price: 990, credits: 1000, credit_days: 365, pro_days: 366 },
-  sign3000: { name: '批次簽名 3,000 份＋進階版 1 年', price: 2490, credits: 3000, credit_days: 365, pro_days: 366 }
+  pro_m: { name: '進階版 1 個月', price: 49, pro_days: 31, pay: 'Credit' },
+  pro_y: { name: '進階版 1 年', price: 390, pro_days: 366 },
+  sign300: { name: '批次簽名 300 份', price: 190, credits: 300, credit_days: 365, pay: 'Credit' },
+  sign1000: { name: '批次簽名 1,000 份＋進階版 1 年', price: 490, credits: 1000, credit_days: 365, pro_days: 366 },
+  sign3000: { name: '批次簽名 3,000 份＋進階版 1 年', price: 990, credits: 3000, credit_days: 365, pro_days: 366 }
 };
+const freeBatchFiles = env => intVar(env, 'FREE_BATCH_FILES', 10);   // 批次轉檔：免費版一次最多幾個檔案，超過要進階版
 function plans(env) { return jsonVar(env, 'PLANS', DEFAULT_PLANS); }
 function freeQuota(env) { return jsonVar(env, 'FREE_QUOTA', { ocr: 10, convert: 10 }); }   // 每個月重新計算
 async function account(u, env) {
@@ -117,17 +127,33 @@ async function account(u, env) {
     uid: u.uid, email: u.email, name: u.name, paid: pro, paid_until: paidUntil || null, quota,
     credits: { paid: creditsLive ? (row.doc_credits || 0) : 0, paid_until: creditsLive ? row.credits_until : null, expired: !creditsLive && (row.doc_credits || 0) > 0 ? row.doc_credits : 0,
       trial: Math.max(0, trialLimit - (row.trial_docs || 0)), trial_limit: trialLimit },
+    batch_files: pro ? null : freeBatchFiles(env),
     site_admin: isSiteAdmin(u, env)
   };
 }
-async function consume(u, env, feature) {
+/* count = 這次要處理幾個檔案（批次轉檔一次多個檔案時，每個檔案算一次） */
+async function consume(u, env, feature, count = 1) {
   const q = freeQuota(env); if (!(feature in q)) throw new HttpError(400, '未知的功能');
+  count = Math.max(1, Math.min(500, parseInt(count, 10) || 1));
   const acc = await account(u, env);
-  if (acc.paid) { await env.DB.prepare('INSERT INTO usage (uid, feature, trial, created_at) VALUES (?, ?, 0, ?)').bind(u.uid, feature, now()).run(); return { ok: true, paid: true }; }
+  const rows = n => Array.from({ length: Math.min(n, 100) }, () => '(?, ?, ?, ?)').join(',');
+  const log = async (trial, n) => { const a = []; for (let i = 0; i < Math.min(n, 100); i++) a.push(u.uid, feature, trial, now()); await env.DB.prepare(`INSERT INTO usage (uid, feature, trial, created_at) VALUES ${rows(n)}`).bind(...a).run(); };
+  if (acc.paid) { await log(0, count); return { ok: true, paid: true }; }
+  const lim = freeBatchFiles(env);
+  if (count > lim) throw new HttpError(402, `免費版一次最多批次轉 ${lim} 個檔案，這次選了 ${count} 個。開通進階版就能一次轉更多（不限次數），或分成每次 ${lim} 個以內轉`, { need_pay: true, feature, batch_limit: lim });
   const left = acc.quota[feature].remaining;
-  if (left <= 0) throw new HttpError(402, `這個月的免費次數（${q[feature]} 次）已經用完，下個月 1 日會重新計算；開通進階版就不限次數`, { need_pay: true, feature });
-  await env.DB.prepare('INSERT INTO usage (uid, feature, trial, created_at) VALUES (?, ?, 1, ?)').bind(u.uid, feature, now()).run();
-  return { ok: true, paid: false, remaining: left - 1 };
+  if (left < count) throw new HttpError(402, left <= 0 ? `這個月的免費次數（${q[feature]} 次）已經用完，下個月 1 日會重新計算；開通進階版就不限次數`
+    : `這個月的免費次數只剩 ${left} 次，這次要轉 ${count} 個檔案。請減少檔案數，或開通進階版就不限次數`, { need_pay: true, feature, remaining: left });
+  await log(1, count);
+  return { ok: true, paid: false, remaining: left - count };
+}
+/* 批次轉檔（JPG／PNG 這種不扣次數的格式）只檢查檔案數 */
+async function batchCheck(u, env, count) {
+  count = Math.max(1, parseInt(count, 10) || 1); const lim = freeBatchFiles(env);
+  if (count <= lim) return { ok: true, limit: lim };
+  const acc = await account(u, env);
+  if (acc.paid) return { ok: true, paid: true };
+  throw new HttpError(402, `免費版一次最多批次轉 ${lim} 個檔案，這次選了 ${count} 個。開通進階版就能一次轉更多，或分成每次 ${lim} 個以內轉`, { need_pay: true, batch_limit: lim });
 }
 /* 扣 1 份：試用批次先用試用份數，用完而且有買份數時，批次自動轉成付費批次 */
 async function spendCredit(env, u, b) {
@@ -275,7 +301,7 @@ async function route(req, env, ctx) {
 
   if (p === '/api/health') return J({ ok: true, time: now() });
   if (p === '/api/config' && M === 'GET') return J({ plans: plans(env), free_quota: freeQuota(env), free_doc_credits: intVar(env, 'FREE_DOC_CREDITS', 30), free_retain_days: intVar(env, 'FREE_RETAIN_DAYS', 14),
-    free_max_batches: intVar(env, 'FREE_MAX_BATCHES', 2), max_retain_days: intVar(env, 'MAX_RETAIN_DAYS', 180), max_pdf_mb: intVar(env, 'MAX_PDF_MB', 10), site_name: env.SITE_NAME || '', support_email: env.SUPPORT_EMAIL || '' });
+    free_max_batches: intVar(env, 'FREE_MAX_BATCHES', 2), free_batch_files: freeBatchFiles(env), owner: env.OWNER_NAME || '', owner_note: env.OWNER_NOTE || '', max_retain_days: intVar(env, 'MAX_RETAIN_DAYS', 180), max_pdf_mb: intVar(env, 'MAX_PDF_MB', 10), site_name: env.SITE_NAME || '', support_email: env.SUPPORT_EMAIL || '' });
 
   /* ---------- 帳號 ---------- */
   if (p === '/api/me' && M === 'GET') {
@@ -283,7 +309,11 @@ async function route(req, env, ctx) {
     await env.DB.prepare('UPDATE users SET email = ?, name = ?, last_seen = ? WHERE uid = ?').bind(u.email, u.name, now(), u.uid).run();
     return J(await account(u, env));
   }
-  if (p === '/api/usage/consume' && M === 'POST') { const u = await authUser(req, env); const { feature } = await body(req); return J(await consume(u, env, feature)); }
+  if (p === '/api/usage/consume' && M === 'POST') { const u = await authUser(req, env); const { feature, count } = await body(req); return J(await consume(u, env, feature, count)); }
+  if (p === '/api/usage/batch' && M === 'POST') { const u = await authUser(req, env); const { count } = await body(req); return J(await batchCheck(u, env, count)); }
+
+  /* ---------- 客服・許願池（使用者） ---------- */
+  if ((m = p.match(/^\/api\/support\/(create|mine|followup|read)$/)) && M === 'POST') { const u = await authUser(req, env); return J(await support(m[1], u, await body(req), env)); }
 
   /* ---------- 學生簽名（公開網址＋token） ---------- */
   if ((m = p.match(/^\/api\/sign\/([^/]+)$/)) && M === 'GET') {
@@ -463,27 +493,137 @@ async function route(req, env, ctx) {
     const pl = plans(env);
     return J({ orders: results.map(o => ({ ...o, plan_name: (pl[o.plan] && pl[o.plan].name) || o.plan })) });
   }
-  /* 學校匯款、開發票等不走綠界的訂單：網站管理者手動開通 */
-  if (p === '/api/admin/grant' && M === 'POST') {
-    const u = await authUser(req, env); if (!isSiteAdmin(u, env)) throw new HttpError(403, '只有網站管理者可以開通');
-    const x = await body(req); const email = normEmail(x.email);
-    const credits = Math.max(0, Math.min(100000, parseInt(x.credits, 10) || 0)), pro_days = Math.max(0, Math.min(3660, parseInt(x.pro_days, 10) || 0));
-    const credit_days = Math.max(1, Math.min(1100, parseInt(x.credit_days, 10) || 365));
-    if (!credits && !pro_days) throw new HttpError(400, '請填份數或進階版天數');
-    const t = await env.DB.prepare('SELECT uid FROM users WHERE email = ? ORDER BY last_seen DESC LIMIT 1').bind(email).first();
-    if (!t) throw new HttpError(404, '找不到這個帳號，請對方先用這個 Google 帳號登入網站一次');
-    await env.DB.batch(grantStmts(env, t.uid, { credits, pro_days, credit_days }, 'admin:' + u.email, String(x.note || '').slice(0, 200)));
-    return J({ ok: true, account: await account({ uid: t.uid, email, name: '' }, env) });
-  }
-
-  /* ---------- 網站管理者：用量監控 ---------- */
-  if (p === '/api/admin/stats' && M === 'GET') {
-    const u = await authUser(req, env); if (!isSiteAdmin(u, env)) throw new HttpError(403, '只有網站管理者可以查看');
-    return J(await siteStats(env));
+  /* ---------- 管理後台（只有網站管理者） ---------- */
+  if ((m = p.match(/^\/api\/admin\/([a-z-]+)$/))) {
+    const u = await authUser(req, env); if (!isSiteAdmin(u, env)) throw new HttpError(403, '只有網站管理者可以使用管理後台');
+    return J(await admin(m[1], M, u, M === 'GET' ? Object.fromEntries(url.searchParams) : await body(req), env));
   }
   throw new HttpError(404, '找不到這個功能');
 }
 function signedName(fn) { return fn.replace(/(\.pdf)?$/i, '(已簽).pdf'); }
+
+/* ============================== 客服・許願池 ==============================
+ * 參考 ar-pet：每一則訊息一筆 tickets；type 'bug' 客服・'wish' 許願池；thread 是之後的來回對話（JSON）。
+ * 使用者只看得到自己的；管理後台（ops.html）看全部、回覆、結案。 */
+const SUPPORT = { maxText: 2000, maxReply: 1000, perDay: 10, maxThread: 40 };
+const cleanText = (s, max) => String(s ?? '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, max);
+const ticketOut = t => ({ id: t.id, type: t.type, text: t.text, price: t.price ?? null, status: t.status, thread: JSON.parse(t.thread || '[]'),
+  user_unread: !!t.user_unread, created_at: t.created_at, updated_at: t.updated_at });
+async function support(action, u, x, env) {
+  if (action === 'create') {
+    const type = String(x.type || ''); if (!['bug', 'wish'].includes(type)) throw new HttpError(400, '訊息種類不對');
+    const text = cleanText(x.text, SUPPORT.maxText);
+    if (text.length < 2) throw new HttpError(400, type === 'wish' ? '請寫下你的願望' : '請描述遇到的問題');
+    let price = null;
+    if (type === 'wish' && x.price !== null && x.price !== undefined && x.price !== '') {
+      price = Math.round(Number(x.price)); if (!(price >= 0 && price <= 100000)) throw new HttpError(400, '金額請填 0～100000 之間的數字');
+    }
+    const c = await env.DB.prepare('SELECT COUNT(*) AS n FROM tickets WHERE uid = ? AND created_at > ?').bind(u.uid, now() - DAY).first();
+    if (c.n >= SUPPORT.perDay) throw new HttpError(429, `24 小時內最多送出 ${SUPPORT.perDay} 則訊息，請明天再試，或在之前的訊息裡補充`);
+    const id = 'T' + randId(9);
+    await env.DB.prepare("INSERT INTO tickets (id, uid, email, name, type, text, price, device, status, thread, user_unread, admin_unread, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?, 'open', '[]', 0, 1, ?, ?)")
+      .bind(id, u.uid, u.email, cleanText(u.name, 60), type, text, price, cleanText(x.device, 300), now(), now()).run();
+    return { ok: true, id };
+  }
+  if (action === 'mine') {
+    const { results } = await env.DB.prepare('SELECT * FROM tickets WHERE uid = ? ORDER BY created_at DESC LIMIT 200').bind(u.uid).all();
+    return { tickets: results.map(ticketOut) };
+  }
+  if (action === 'followup') {
+    const text = cleanText(x.text, SUPPORT.maxReply); if (!text) throw new HttpError(400, '請輸入內容');
+    const t = await env.DB.prepare('SELECT * FROM tickets WHERE id = ? AND uid = ?').bind(String(x.id || ''), u.uid).first();
+    if (!t) throw new HttpError(404, '找不到這則訊息');
+    if (t.status === 'closed') throw new HttpError(400, '這則訊息已經結案了，有新的問題請重新送出一則');
+    const th = JSON.parse(t.thread || '[]'); if (th.length >= SUPPORT.maxThread) throw new HttpError(400, '這則訊息的對話太長了，請重新送出一則');
+    th.push({ by: 'user', text, at: now() });
+    await env.DB.prepare("UPDATE tickets SET thread = ?, status = 'open', admin_unread = 1, updated_at = ? WHERE id = ?").bind(JSON.stringify(th), now(), t.id).run();
+    return { ok: true };
+  }
+  if (action === 'read') {
+    const ids = (Array.isArray(x.ids) ? x.ids : []).slice(0, 50).map(String);
+    for (const id of ids) await env.DB.prepare('UPDATE tickets SET user_unread = 0 WHERE id = ? AND uid = ?').bind(id, u.uid).run();
+    return { ok: true };
+  }
+  throw new HttpError(404, '沒有這個功能');
+}
+
+/* ============================== 管理後台 ============================== */
+const clampInt = (v, lo, hi, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
+async function userRow(env, email) { return env.DB.prepare('SELECT * FROM users WHERE email = ? ORDER BY last_seen DESC LIMIT 1').bind(normEmail(email)).first(); }
+async function admin(action, M, me, x, env) {
+  const DB = env.DB;
+  if (action === 'stats' && M === 'GET') {
+    const s = await siteStats(env);
+    s.tickets_unread = ((await DB.prepare('SELECT COUNT(*) AS n FROM tickets WHERE admin_unread = 1').first()) || {}).n || 0;
+    return s;
+  }
+  /* 帳號列表／搜尋 */
+  if (action === 'users' && M === 'GET') {
+    const q = String(x.q || '').trim().toLowerCase(); const t = now();
+    const where = q ? 'WHERE email LIKE ?1 OR name LIKE ?1' : '';
+    const { results } = await DB.prepare(`SELECT uid, email, name, paid_until, doc_credits, credits_until, trial_docs, created_at, last_seen FROM users ${where} ORDER BY last_seen DESC LIMIT 200`).bind(...(q ? ['%' + q + '%'] : [])).all();
+    const pend = (await DB.prepare('SELECT * FROM pending_grants WHERE applied_at IS NULL ORDER BY created_at DESC LIMIT 100').all()).results;
+    return { users: results.map(r => ({ ...r, pro: (r.paid_until || 0) > t, credits_live: (r.credits_until || 0) > t ? (r.doc_credits || 0) : 0 })), pending: pend };
+  }
+  /* 手動開通：加進階版天數／簽名份數。對方還沒登入過也可以，先存起來，第一次登入時自動加上 */
+  if (action === 'grant' && M === 'POST') {
+    const email = normEmail(x.email); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, '請輸入正確的 Email');
+    const credits = clampInt(x.credits, 0, 100000, 0), pro_days = clampInt(x.pro_days, 0, 36600, 0), credit_days = clampInt(x.credit_days, 1, 3660, 365);
+    if (!credits && !pro_days) throw new HttpError(400, '請填進階版天數或簽名份數');
+    const note = String(x.note || '').slice(0, 200), reason = 'admin:' + me.email;
+    const t = await userRow(env, email);
+    if (!t) {
+      await DB.prepare('INSERT INTO pending_grants (email, pro_days, credits, credit_days, reason, note, created_at) VALUES (?,?,?,?,?,?,?)').bind(email, pro_days, credits, credit_days, reason, note, now()).run();
+      return { ok: true, pending: true, email };
+    }
+    await DB.batch(grantStmts(env, t.uid, { credits, pro_days, credit_days }, reason, note));
+    return { ok: true, account: await account({ uid: t.uid, email, name: '' }, env) };
+  }
+  /* 直接設定：進階版到期日、剩餘份數（用來收回權限、修正錯誤） */
+  if (action === 'set' && M === 'POST') {
+    const t = await DB.prepare('SELECT * FROM users WHERE uid = ?').bind(String(x.uid || '')).first(); if (!t) throw new HttpError(404, '找不到這個帳號');
+    const paid_until = x.paid_until === null || x.paid_until === '' ? null : clampInt(x.paid_until, 0, 9e15, t.paid_until);
+    const doc_credits = x.doc_credits == null ? t.doc_credits : clampInt(x.doc_credits, 0, 1000000, t.doc_credits);
+    await DB.batch([DB.prepare('UPDATE users SET paid_until = ?, doc_credits = ? WHERE uid = ?').bind(paid_until, doc_credits, t.uid),
+      DB.prepare('INSERT INTO credit_log (uid, credits, pro_days, reason, ref, created_at) VALUES (?,?,?,?,?,?)').bind(t.uid, (doc_credits || 0) - (t.doc_credits || 0), 0, 'admin-set:' + me.email, String(x.note || `paid_until=${paid_until}`).slice(0, 200), now())]);
+    return { ok: true, account: await account({ uid: t.uid, email: t.email, name: t.name }, env) };
+  }
+  if (action === 'pending-delete' && M === 'POST') { await DB.prepare('DELETE FROM pending_grants WHERE id = ? AND applied_at IS NULL').bind(+x.id || 0).run(); return { ok: true }; }
+  /* 訂單：列表、標記已退款（同時收回這筆訂單給的天數和份數） */
+  if (action === 'orders' && M === 'GET') {
+    const { results } = await DB.prepare("SELECT * FROM orders WHERE status != 'created' OR created_at > ? ORDER BY created_at DESC LIMIT 200").bind(now() - 3 * DAY).all();
+    const pl = plans(env); return { orders: results.map(o => ({ ...o, plan_name: (pl[o.plan] && pl[o.plan].name) || o.plan })) };
+  }
+  if (action === 'refund' && M === 'POST') {
+    const o = await DB.prepare("SELECT * FROM orders WHERE trade_no = ? AND status = 'paid'").bind(String(x.trade_no || '')).first();
+    if (!o) throw new HttpError(404, '找不到這筆已付款的訂單');
+    const st = [DB.prepare("UPDATE orders SET status = 'refunded', note = ? WHERE trade_no = ?").bind(`退款 by ${me.email}：${String(x.note || '').slice(0, 150)}`, o.trade_no)];
+    if (x.revoke !== false) {
+      if (o.days) st.push(DB.prepare('UPDATE users SET paid_until = MAX(0, COALESCE(paid_until, 0) - ?) WHERE uid = ?').bind(o.days * DAY, o.uid));
+      if (o.credits) st.push(DB.prepare('UPDATE users SET doc_credits = MAX(0, COALESCE(doc_credits, 0) - ?) WHERE uid = ?').bind(o.credits, o.uid));
+      st.push(DB.prepare('INSERT INTO credit_log (uid, credits, pro_days, reason, ref, created_at) VALUES (?,?,?,?,?,?)').bind(o.uid, -(o.credits || 0), -(o.days || 0), 'refund:' + me.email, o.trade_no, now()));
+    }
+    await DB.batch(st); return { ok: true };
+  }
+  /* 客服・許願池 */
+  if (action === 'tickets' && M === 'GET') {
+    const type = ['bug', 'wish'].includes(x.type) ? x.type : null;
+    const { results } = await DB.prepare(`SELECT * FROM tickets ${type ? 'WHERE type = ?' : ''} ORDER BY updated_at DESC LIMIT 500`).bind(...(type ? [type] : [])).all();
+    return { tickets: results.map(t => ({ ...ticketOut(t), uid: t.uid, email: t.email, name: t.name, device: t.device, admin_unread: !!t.admin_unread })) };
+  }
+  if (action === 'ticket' && M === 'POST') {   // 回覆／改狀態／標記已讀
+    const t = await DB.prepare('SELECT * FROM tickets WHERE id = ?').bind(String(x.id || '')).first(); if (!t) throw new HttpError(404, '找不到這則訊息');
+    const text = cleanText(x.text, SUPPORT.maxReply); const th = JSON.parse(t.thread || '[]');
+    let status = x.status || t.status; if (text && !x.status) status = 'replied';
+    if (!['open', 'replied', 'closed'].includes(status)) throw new HttpError(400, '狀態不對');
+    if (text) th.push({ by: 'admin', text, at: now() });
+    await DB.prepare('UPDATE tickets SET thread = ?, status = ?, admin_unread = 0, user_unread = CASE WHEN ? THEN 1 ELSE user_unread END, updated_at = CASE WHEN ? THEN ? ELSE updated_at END WHERE id = ?')
+      .bind(JSON.stringify(th), status, text ? 1 : 0, text || x.status ? 1 : 0, now(), t.id).run();
+    return { ok: true };
+  }
+  if (action === 'ticket-delete' && M === 'POST') { await DB.prepare('DELETE FROM tickets WHERE id = ?').bind(String(x.id || '')).run(); return { ok: true }; }
+  throw new HttpError(404, '找不到這個功能');
+}
 
 /* ============================== 用量統計與排程 ============================== */
 async function siteStats(env) {
@@ -527,7 +667,12 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS orders (trade_no TEXT PRIMARY KEY, uid TEXT NOT NULL, email TEXT, plan TEXT, amount INTEGER, days INTEGER, credits INTEGER DEFAULT 0, credit_days INTEGER DEFAULT 0, status TEXT, created_at INTEGER, paid_at INTEGER, ecpay_trade_no TEXT, payment_type TEXT, note TEXT)`,
   `CREATE INDEX IF NOT EXISTS idx_orders_uid ON orders(uid)`,
   `CREATE TABLE IF NOT EXISTS credit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL, credits INTEGER, pro_days INTEGER, reason TEXT, ref TEXT, created_at INTEGER)`,
-  `CREATE INDEX IF NOT EXISTS idx_credit_uid ON credit_log(uid)`
+  `CREATE INDEX IF NOT EXISTS idx_credit_uid ON credit_log(uid)`,
+  `CREATE TABLE IF NOT EXISTS tickets (id TEXT PRIMARY KEY, uid TEXT NOT NULL, email TEXT, name TEXT, type TEXT NOT NULL, text TEXT, price INTEGER, device TEXT, status TEXT, thread TEXT, user_unread INTEGER DEFAULT 0, admin_unread INTEGER DEFAULT 1, created_at INTEGER, updated_at INTEGER)`,
+  `CREATE INDEX IF NOT EXISTS idx_tickets_uid ON tickets(uid)`,
+  `CREATE INDEX IF NOT EXISTS idx_tickets_upd ON tickets(updated_at)`,
+  `CREATE TABLE IF NOT EXISTS pending_grants (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, pro_days INTEGER, credits INTEGER, credit_days INTEGER, reason TEXT, note TEXT, created_at INTEGER, applied_at INTEGER, uid TEXT)`,
+  `CREATE INDEX IF NOT EXISTS idx_pending_email ON pending_grants(email)`
 ];
 let schemaReady = null;
 const FILE_SCHEMA = [`CREATE TABLE IF NOT EXISTS files (key TEXT NOT NULL, part INTEGER NOT NULL, data BLOB, created_at INTEGER, PRIMARY KEY (key, part))`];

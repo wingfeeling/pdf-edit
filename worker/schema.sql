@@ -85,3 +85,22 @@ CREATE TABLE IF NOT EXISTS files (
   created_at INTEGER,
   PRIMARY KEY (key, part)
 );
+
+-- 客服・許願池（參考 ar-pet）：type = bug（客服）/ wish（許願池）；thread = 來回對話的 JSON
+CREATE TABLE IF NOT EXISTS tickets (
+  id TEXT PRIMARY KEY, uid TEXT NOT NULL, email TEXT, name TEXT,
+  type TEXT NOT NULL, text TEXT, price INTEGER, device TEXT,
+  status TEXT,                   -- open / replied / closed
+  thread TEXT, user_unread INTEGER DEFAULT 0, admin_unread INTEGER DEFAULT 1,
+  created_at INTEGER, updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tickets_uid ON tickets(uid);
+CREATE INDEX IF NOT EXISTS idx_tickets_upd ON tickets(updated_at);
+
+-- 管理後台手動開通給「還沒登入過」的 Email：對方第一次登入時自動加上
+CREATE TABLE IF NOT EXISTS pending_grants (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
+  pro_days INTEGER, credits INTEGER, credit_days INTEGER, reason TEXT, note TEXT,
+  created_at INTEGER, applied_at INTEGER, uid TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pending_email ON pending_grants(email);

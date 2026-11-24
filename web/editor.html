@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PDF 線上編輯器</title>
+<title>凌的萬用pdf編輯器｜PDF 編輯器</title>
 <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
@@ -137,7 +137,7 @@ body.dragging #empty .drop,body.dragging #viewer{outline:3px dashed var(--accent
 </head>
 <body class="tool-select">
 <header>
-  <a class="brand" href="index.html" style="text-decoration:none;color:inherit" title="回首頁"><i>PDF</i>線上編輯器</a>
+  <a class="brand" href="index.html" style="text-decoration:none;color:inherit" title="回首頁"><i>PDF</i>凌的萬用pdf編輯器</a>
   <button class="tb" id="bOpen" data-ic="open" title="開啟 PDF 或掃描圖片">開啟</button>
   <button class="tb" id="bMerge" data-ic="merge" title="把其他 PDF 接在後面（合併）">合併</button>
   <button class="tb" id="bConvert" data-ic="convert" title="PDF 轉 JPG／Word／Excel／PPT，或把這些檔案轉成 PDF">轉檔</button>
@@ -293,7 +293,7 @@ function pdfRect(vp, x, y, w, h) { const a = vp.convertToPdfPoint(x, y), b = vp.
 const place = (el, d) => { el.style.left = d.x + 'px'; el.style.top = d.y + 'px'; el.style.width = d.w + 'px'; el.style.height = d.h + 'px'; };
 const hex2rgb = h => { h = h.replace('#', ''); if (h.length === 3) h = h.split('').map(c => c + c).join(''); const n = parseInt(h, 16); return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
 const toHex = (r, g, b) => '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
-const canvasToBytes = (c, type, q) => new Promise(res => c.toBlob(b => b.arrayBuffer().then(x => res(new Uint8Array(x))), type, q));
+const canvasToBytes = (c, type, q) => new Promise((res, rej) => c.toBlob(b => b ? b.arrayBuffer().then(x => res(new Uint8Array(x)), rej) : rej(new Error('圖片太大，瀏覽器畫不出來，請把解析度調低再試')), type, q));
 const dataUrlBytes = async u => new Uint8Array(await (await fetch(u)).arrayBuffer());
 
 /* ---------- ui helpers ---------- */
@@ -1143,10 +1143,11 @@ async function buildPdf(list) {
       else if (a.type === 'text') await drawTextBlock(out, cp, helv, vp, a.rot, d.x, d.y, a.text, a.size, a.color, a.font || '');
     }
   }
-  out.setProducer('PDF 線上編輯器'); out.setTitle(S.fileName || 'document');
+  out.setProducer((window.APP_CONFIG && APP_CONFIG.siteName) || 'PDF 編輯器'); out.setTitle(S.fileName || 'document');
   return await out.save();
 }
 function download(bytes, name) {
+  if (SAVE_SINK) { SAVE_SINK.push({ blob: new Blob([bytes], { type: 'application/pdf' }), name }); return; }
   const u = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
   const a = document.createElement('a'); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(u), 60000);
@@ -1513,7 +1514,9 @@ function loadLib(k) {
   });
   return libP[k];
 }
+let SAVE_SINK = null;   // 批次轉檔時，先把每個檔案收集起來，最後打包成一個 ZIP（一次下載很多檔案會被瀏覽器擋掉）
 function saveBlob(blob, name) {
+  if (SAVE_SINK) { SAVE_SINK.push({ blob, name }); return; }
   const u = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = u; a.download = name;
   document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 60000);
 }
@@ -1522,7 +1525,8 @@ const MIME = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
 };
-const canvasBlob = (c, type, q) => new Promise(r => c.toBlob(r, type, q));
+const canvasBlob = (c, type, q) => new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('圖片太大，瀏覽器畫不出來（手機特別容易遇到），請把解析度調低再試')), type, q));
+const MAX_PX = 16e6;   // 手機瀏覽器一張畫布最多約 1,600 萬像素，超過會變成空白檔
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /* ---- read the final (edited) document back as a plain pdf.js doc ---- */
@@ -1603,7 +1607,8 @@ async function pdfToImages(pdf, fmt, dpi, base, zipIt) {
   const files = []; const sc = dpi / 72; const ext = fmt === 'png' ? 'png' : 'jpg'; const w = String(pdf.numPages).length;
   for (let i = 1; i <= pdf.numPages; i++) {
     busy(`轉成圖片中（${i}/${pdf.numPages}）…`, i / pdf.numPages);
-    const page = await pdf.getPage(i); const vp = page.getViewport({ scale: sc });
+    const page = await pdf.getPage(i); const v1 = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: Math.min(sc, Math.sqrt(MAX_PX / (v1.width * v1.height))) });   // 大張的頁面自動降一點解析度，免得轉出空白
     const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
     const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
     await page.render({ canvasContext: x, viewport: vp }).promise;
@@ -1612,7 +1617,7 @@ async function pdfToImages(pdf, fmt, dpi, base, zipIt) {
   }
   if (files.length === 1) return saveBlob(files[0].blob, files[0].name);
   if (zipIt) { const z = new JSZip(); files.forEach(f => z.file(f.name, f.blob)); busy('打包 ZIP 中…'); saveBlob(await z.generateAsync({ type: 'blob' }), `${base}-圖片.zip`); }
-  else for (const f of files) { saveBlob(f.blob, f.name); await sleep(400); }
+  else { if (!SAVE_SINK) toast(`開始下載 ${files.length} 張圖；如果瀏覽器問「允許下載多個檔案」，請按允許，不然只會下載到第一張`, 8000); for (const f of files) { saveBlob(f.blob, f.name); await sleep(SAVE_SINK ? 0 : 600); } }
 }
 
 /* ---- v5: read ruling lines / filled boxes so tables survive conversion ---- */
@@ -1980,7 +1985,7 @@ async function pdfToWord(pdf, mode, useOcr, base) {
     if (!children.length || lastTable) children.push(spacer(D, 1));
     sections.push({ properties: { page: { size: { width: tw(W), height: tw(H) }, margin: { top: tw(topM), bottom: tw(18), left: tw(left), right: tw(rightM), header: 0, footer: 0 } } }, children });
   }
-  const doc = new D.Document({ creator: 'PDF 線上編輯器', title: base, styles: { default: { document: { run: { font: WFONT } } } }, sections });
+  const doc = new D.Document({ creator: (window.APP_CONFIG && APP_CONFIG.siteName) || 'PDF 編輯器', title: base, styles: { default: { document: { run: { font: WFONT } } } }, sections });
   busy('產生 Word 檔中…');
   const blob = await D.Packer.toBlob(doc); saveBlob(new Blob([blob], { type: MIME.docx }), `${base}.docx`);
   window.__lastWord = { tables: tablesFound, scanned };
@@ -2464,15 +2469,18 @@ function openConvert() {
   modal(`<h3>轉檔</h3>
   <div class="chips" id="cvDir" style="margin-bottom:12px"><button data-v="from" class="${CV.dir === 'from' ? 'on' : ''}">PDF 轉成其他格式</button><button data-v="to" class="${CV.dir === 'to' ? 'on' : ''}">其他格式轉成 PDF</button></div>
   <div id="cvFrom" style="display:${CV.dir === 'from' ? '' : 'none'}">
-    ${has ? '' : '<div class="info" style="margin-bottom:10px">請先開啟一份 PDF，再回來轉檔。</div>'}
+    <div class="row" style="margin-bottom:8px"><span>要轉哪些檔案：</span><label><input type="radio" name="cvSrc" value="cur" ${has ? 'checked' : 'disabled'}> 目前開啟的文件</label><label><input type="radio" name="cvSrc" value="many" ${has ? '' : 'checked'}> <b>批次</b>：一次選很多個 PDF</label></div>
+    <div class="info" id="cvBatchInfo" style="margin-bottom:10px;display:none">批次轉檔：每個 PDF 各自轉好，最後打包成一個 ZIP 下載。免費版一次最多 <b>${BATCH_FREE}</b> 個檔案，超過要<a href="pricing.html" target="_blank">進階版</a>。轉 Word／Excel／PPT 時，每個檔案算一次免費次數。</div>
     <div class="chips" id="cvFmt"><button data-v="jpg">JPG 圖片</button><button data-v="png">PNG 圖片</button><button data-v="docx">Word</button><button data-v="xlsx">Excel</button><button data-v="pptx">PowerPoint</button></div>
     <div id="cvOpts" style="margin-top:12px"></div>
-    <div class="row" style="margin-top:8px"><label><input type="radio" name="cvScope" value="all" checked> 全部 ${S.pages.length} 頁</label><label><input type="radio" name="cvScope" value="chk" ${nChk ? '' : 'disabled'}> 只轉左側勾選的 ${nChk} 頁</label></div>
+    <div class="row" id="cvScopeRow" style="margin-top:8px"><label><input type="radio" name="cvScope" value="all" checked> 全部 ${S.pages.length} 頁</label><label><input type="radio" name="cvScope" value="chk" ${nChk ? '' : 'disabled'}> 只轉左側勾選的 ${nChk} 頁</label></div>
     <div class="info" style="margin-top:8px">會連同你在頁面上的修改（簽名、印章、改過的字）一起轉換。</div>
-    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn" id="cvCancel">取消</button><button class="btn primary" id="cvGo" ${has ? '' : 'disabled'}>開始轉檔</button></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn" id="cvCancel">取消</button><button class="btn primary" id="cvGo">開始轉檔</button></div>
+    <input type="file" id="cvPdfs" multiple hidden accept="application/pdf,.pdf">
   </div>
   <div id="cvTo" style="display:${CV.dir === 'to' ? '' : 'none'}">
-    <div class="info">可以轉成 PDF 的檔案：<b>JPG／PNG 圖片</b>（可多張合成一份）、<b>Word (.docx)</b>、<b>Excel (.xlsx／.xls／.csv)</b>、<b>PowerPoint (.pptx)</b>。<br>舊版的 .doc／.ppt 請先在 Office 裡「另存新檔」成 .docx／.pptx。</div>
+    <div class="info">可以轉成 PDF 的檔案：<b>JPG／PNG 圖片</b>（可多張合成一份）、<b>Word (.docx)</b>、<b>Excel (.xlsx／.xls／.csv)</b>、<b>PowerPoint (.pptx)</b>。<br>舊版的 .doc／.ppt 請先在 Office 裡「另存新檔」成 .docx／.pptx。<br><b>可以一次選很多個檔案批次轉檔</b>，選「直接下載」時多個 PDF 會打包成一個 ZIP。免費版一次最多 ${BATCH_FREE} 個檔案。</div>
+    <div class="row" style="margin-top:10px"><span>多張圖片：</span><label><input type="radio" name="cvImgs" value="one" checked> 合成一份 PDF</label><label><input type="radio" name="cvImgs" value="each"> 每張各一份 PDF</label></div>
     <div class="row" style="margin-top:10px"><span>圖片頁面大小：</span><label><input type="radio" name="cvFit" value="a4" checked> A4（置中）</label><label><input type="radio" name="cvFit" value="img"> 跟圖片一樣大</label></div>
     <div class="row"><span>轉好以後：</span><label><input type="radio" name="cvAfter" value="open" checked> 在編輯器裡開啟</label><label><input type="radio" name="cvAfter" value="dl"> 直接下載</label></div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn" id="cvCancel2">取消</button><button class="btn primary" id="cvPick">選擇檔案…</button></div>
@@ -2487,41 +2495,93 @@ function openConvert() {
     else o.innerHTML = `<div class="row"><label><input type="checkbox" id="cvNotes" checked> 把每頁的文字放進「備忘稿」</label></div><div class="info">每一頁變成一張投影片，外觀和 PDF 一樣。</div>`;
   };
   setFmt(CV.fmt);
+  const setSrc = () => { const many = document.querySelector('[name=cvSrc]:checked').value === 'many';
+    $('#cvBatchInfo').style.display = many ? '' : 'none'; $('#cvScopeRow').style.display = many ? 'none' : ''; $('#cvGo').textContent = many ? '選擇 PDF 檔…' : '開始轉檔'; };
+  document.querySelectorAll('[name=cvSrc]').forEach(r => r.onchange = setSrc); setSrc();
   $('#cvFmt').onclick = e => { const b = e.target.closest('button'); if (b) setFmt(b.dataset.v); };
   $('#cvDir').onclick = e => { const b = e.target.closest('button'); if (!b) return; CV.dir = b.dataset.v; $('#cvFrom').style.display = CV.dir === 'from' ? '' : 'none'; $('#cvTo').style.display = CV.dir === 'to' ? '' : 'none'; document.querySelectorAll('#cvDir button').forEach(x => x.classList.toggle('on', x === b)); };
   $('#cvCancel').onclick = $('#cvCancel2').onclick = closeModal;
   $('#cvPick').onclick = () => $('#cvFile').click();
-  $('#cvFile').onchange = e => { const fs = [...e.target.files]; const fit = document.querySelector('[name=cvFit]:checked').value, after = document.querySelector('[name=cvAfter]:checked').value; closeModal(); convertToPdf(fs, fit, after); };
+  $('#cvFile').onchange = e => { const fs = [...e.target.files]; const fit = document.querySelector('[name=cvFit]:checked').value, after = document.querySelector('[name=cvAfter]:checked').value, each = document.querySelector('[name=cvImgs]:checked').value === 'each'; closeModal(); convertToPdf(fs, fit, after, each); };
+  const opts = () => ({ fmt: CV.fmt, dpi: +($('#cvDpi') || {}).value || 150, zip: !!($('#cvZip') || {}).checked, ocr: !!($('#cvOcr') || {}).checked, notes: !!($('#cvNotes') || {}).checked,
+      wordMode: (document.querySelector('[name=cvWm]:checked') || {}).value, oneSheet: (document.querySelector('[name=cvXm]:checked') || {}).value === 'one' });
+  $('#cvPdfs').onchange = e => { const fs = [...e.target.files]; const o = opts(); closeModal(); convertManyPdfs(fs, o); };
   $('#cvGo').onclick = () => {
+    if (document.querySelector('[name=cvSrc]:checked').value === 'many') return $('#cvPdfs').click();
     const scope = document.querySelector('[name=cvScope]:checked').value; const list = scope === 'chk' ? S.pages.filter(p => p.checked) : S.pages;
-    const o = { fmt: CV.fmt, dpi: +($('#cvDpi') || {}).value || 150, zip: !!($('#cvZip') || {}).checked, ocr: !!($('#cvOcr') || {}).checked, notes: !!($('#cvNotes') || {}).checked,
-      wordMode: (document.querySelector('[name=cvWm]:checked') || {}).value, oneSheet: (document.querySelector('[name=cvXm]:checked') || {}).value === 'one' };
-    closeModal(); convertFromPdf(list, o);
+    closeModal(); convertFromPdf(list, opts());
   };
+}
+/* ---- 批次轉檔：很多個 PDF → JPG／PNG／Word／Excel／PPT，全部打包成一個 ZIP ---- */
+let BATCH_FREE = 10;   // 只是畫面上顯示用；真正的上限由後端 FREE_BATCH_FILES 決定（開頁時會更新）
+async function batchGate(n, office) {
+  if (n <= 1 && !office) return true;
+  if (office) return gate('convert', n);
+  try { return (window.PDFAPP && PDFAPP.batch) ? !!(await PDFAPP.batch(n)) : true; } catch (e) { toast(e.message || String(e), 6000); return false; }
+}
+function uniqName(used, name) { let n = name, k = 2; const m = name.match(/^(.*?)(\.[^.]+)?$/); while (used.has(n)) n = `${m[1]}(${k++})${m[2] || ''}`; used.add(n); return n; }
+async function zipAndSave(items, zipName) {
+  if (items.length === 1) return saveBlob(items[0].blob, items[0].name);
+  busy('打包 ZIP 中…'); const z = new JSZip(); const used = new Set();
+  for (const it of items) z.file(uniqName(used, it.name), it.blob);
+  SAVE_SINK = null; saveBlob(await z.generateAsync({ type: 'blob' }), zipName);
+}
+async function convertManyPdfs(files, o) {
+  files = files.filter(f => /\.pdf$/i.test(f.name) || f.type === 'application/pdf');
+  if (!files.length) return toast('請選 PDF 檔');
+  const office = ['docx', 'xlsx', 'pptx'].includes(o.fmt);
+  if (!(await batchGate(files.length, office))) return;
+  closeEditor(true);
+  const out = [], fail = []; let scanned = 0;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i], base = f.name.replace(/\.[^.]+$/, '');
+      busy(`批次轉檔：第 ${i + 1}/${files.length} 份（${base}）…`, i / files.length);
+      SAVE_SINK = [];
+      let pdf = null;
+      try {
+        pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await f.arrayBuffer()), ...PDFJS_OPTS }).promise;
+        if (o.fmt === 'jpg' || o.fmt === 'png') await pdfToImages(pdf, o.fmt, o.dpi, base, false);
+        else if (o.fmt === 'docx') scanned += await pdfToWord(pdf, o.wordMode, o.ocr, base);
+        else if (o.fmt === 'xlsx') scanned += await pdfToExcel(pdf, o.oneSheet, o.ocr, base);
+        else if (o.fmt === 'pptx') await pdfToPpt(pdf, o.notes, base);
+        // 圖片：一個 PDF 有好幾頁時，放進以檔名命名的資料夾
+        const got = SAVE_SINK; out.push(...(got.length > 1 ? got.map(x => ({ blob: x.blob, name: `${base}/${x.name}` })) : got));
+      } catch (e) { console.error(e); fail.push(`${f.name}（${e && /password/i.test(e.name || e.message) ? '有密碼保護' : (e.message || e)}）`); }
+      finally { SAVE_SINK = null; if (pdf) pdf.destroy(); }
+    }
+    if (out.length) await zipAndSave(out, `批次轉檔-${o.fmt.toUpperCase()}-${files.length - fail.length}份.zip`);
+    busy(false);
+    toast((out.length ? `批次轉檔完成：${files.length - fail.length} 份已打包成 ZIP 下載` : '沒有轉成功的檔案') + (scanned ? `（其中 ${scanned} 頁是掃描頁，已用文字辨識轉出）` : '') + (fail.length ? `。失敗 ${fail.length} 份：${fail.join('、')}` : ''), fail.length ? 12000 : 6000);
+  } catch (e) { console.error(e); SAVE_SINK = null; busy(false); toast('批次轉檔失敗：' + (e.message || e), 8000); }
 }
 async function convertFromPdf(list, o) {
   if (!list.length) return toast('沒有可以轉換的頁面');
   if (['docx', 'xlsx', 'pptx'].includes(o.fmt) && !(await gate('convert'))) return;
-  closeEditor(true);
+  closeEditor(true); let pdf = null;
   const base = (S.fileName || '文件') + (list.length < S.pages.length ? `-${list.length}頁` : '');
   try {
-    busy('準備轉檔中…'); const { pdf } = await finalPdf(list); let scanned = 0;
+    busy('準備轉檔中…'); pdf = (await finalPdf(list)).pdf; let scanned = 0;
     if (o.fmt === 'jpg' || o.fmt === 'png') await pdfToImages(pdf, o.fmt, o.dpi, base, o.zip);
     else if (o.fmt === 'docx') scanned = await pdfToWord(pdf, o.wordMode, o.ocr, base);
     else if (o.fmt === 'xlsx') scanned = await pdfToExcel(pdf, o.oneSheet, o.ocr, base);
     else if (o.fmt === 'pptx') await pdfToPpt(pdf, o.notes, base);
-    pdf.destroy(); busy(false);
+    busy(false);
     toast(`轉檔完成，已開始下載${scanned ? `（其中 ${scanned} 頁是掃描頁，已用文字辨識轉出，請檢查有沒有認錯字）` : ''}`, 6000);
   } catch (e) { console.error(e); busy(false); toast('轉檔失敗：' + (e.message || e), 8000); }
+  finally { if (pdf) pdf.destroy(); }
 }
-async function convertToPdf(files, fit, after) {
+async function convertToPdf(files, fit, after, eachImg) {
   if (!files.length) return;
   const imgs = files.filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|gif|webp|bmp)$/i.test(f.name));
   const others = files.filter(f => !imgs.includes(f));
   const results = [];
   try {
-    if (others.some(f => /\.(docx|xlsx|xls|csv|pptx)$/i.test(f.name)) && !(await gate('convert'))) return;
-    if (imgs.length) { imgs.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant', { numeric: true })); results.push({ name: imgs.length === 1 ? imgs[0].name.replace(/\.[^.]+$/, '') : '圖片合併', bytes: await imagesToPdf(imgs, fit) }); }
+    const nOffice = others.filter(f => /\.(docx|xlsx|xls|csv|pptx)$/i.test(f.name)).length;
+    if (!(await batchGate(files.length, false))) return;            // 批次：免費版一次最多 N 個檔案
+    if (nOffice && !(await gate('convert', nOffice))) return;      // Word／Excel／PPT：每個檔案算一次
+    if (imgs.length && eachImg) { imgs.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant', { numeric: true })); for (let i = 0; i < imgs.length; i++) { busy(`圖片轉 PDF 中（${i + 1}/${imgs.length}）…`, i / imgs.length); results.push({ name: imgs[i].name.replace(/\.[^.]+$/, ''), bytes: await imagesToPdf([imgs[i]], fit) }); } }
+    else if (imgs.length) { imgs.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant', { numeric: true })); results.push({ name: imgs.length === 1 ? imgs[0].name.replace(/\.[^.]+$/, '') : '圖片合併', bytes: await imagesToPdf(imgs, fit) }); }
     for (const f of others) {
       const nm = f.name.replace(/\.[^.]+$/, ''); let bytes;
       if (/\.docx$/i.test(f.name)) { busy('讀取 Word 檔中…'); bytes = await wordToPdf(f); }
@@ -2534,7 +2594,11 @@ async function convertToPdf(files, fit, after) {
   } catch (e) { console.error(e); busy(false); toast('轉成 PDF 失敗：' + (e.message || e), 8000); return; }
   busy(false);
   if (!results.length) return;
-  if (after === 'dl') { for (const r of results) { download(r.bytes, r.name + '.pdf'); await sleep(400); } toast(`已轉好 ${results.length} 個 PDF 並開始下載`); return; }
+  if (after === 'dl') {   // 多個檔案打包成一個 ZIP；以前是一個一個下載，第 2 個以後常被瀏覽器擋掉
+    try { await zipAndSave(results.map(r => ({ blob: new Blob([r.bytes], { type: 'application/pdf' }), name: r.name + '.pdf' })), `轉成PDF-${results.length}份.zip`); busy(false); }
+    catch (e) { busy(false); return toast('打包下載失敗：' + (e.message || e), 8000); }
+    toast(results.length > 1 ? `已轉好 ${results.length} 個 PDF，打包成 ZIP 下載` : '已轉好 PDF 並開始下載'); return;
+  }
   const fl = results.map(r => new File([r.bytes], r.name + '.pdf', { type: 'application/pdf' }));
   const merge = S.pages.length > 0 && confirm('要把轉好的 PDF 接在目前文件的後面嗎？\n按「取消」則改為開啟成新文件。');
   await addFiles(fl, !merge);
@@ -2542,6 +2606,7 @@ async function convertToPdf(files, fit, after) {
 }
 
 $('#bConvert').onclick = openConvert;
+window.addEventListener('load', () => { if (window.App) App.api('/api/config').then(c => { if (c.free_batch_files) BATCH_FREE = c.free_batch_files; }).catch(() => { }); });
 $('#bOrient').onclick = () => { const p = getPg(S.cur); if (p) orientPages([p]); };
 $('#bOrientAll').onclick = () => orientPages(S.pages);
 updatePanel();

@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-Hant-TW">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>方案與價格</title><link rel="stylesheet" href="css/site.css">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>方案與價格｜凌的萬用pdf編輯器</title><link rel="stylesheet" href="css/site.css">
 <style>
 .plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
 .plans .card{display:flex;flex-direction:column}
@@ -14,12 +14,14 @@ table.cmp td,table.cmp th{text-align:left}
 <div class="wrap">
   <h1>方案與價格</h1>
   <p class="sub">不用月費也能用：編輯器的基本功能永久免費；批次線上簽名用多少買多少，一年內用完就好。付款由綠界科技處理，本站不會經手你的信用卡資料。</p>
+  <div class="notice info">本站為個人經營、使用免費的雲端服務架設，所以價格比國外同類網站（例如 iLovePDF、Smallpdf、Sejda 的付費方案）都便宜很多。</div>
 
   <h2>免費就能用</h2>
   <div class="card">
     <table class="t cmp"><tbody>
       <tr><th style="width:34%">PDF 編輯（改字、簽名、印章、表單、合併、拆分、轉正、轉圖片）</th><td>永久免費、不限次數</td></tr>
       <tr><th>掃描檔文字辨識、Word／Excel／PPT 轉檔</th><td>每個月各 <b id="fq"></b> 次（每月 1 日重新計算）</td></tr>
+      <tr><th>批次轉檔</th><td>一次最多 <b id="fb"></b> 個檔案（進階版不限）</td></tr>
       <tr><th>批次線上簽名</th><td>每個帳號免費試用 <b id="fd"></b> 份，試用批次保存 <b id="fr"></b> 天</td></tr>
     </tbody></table>
   </div>
@@ -36,8 +38,8 @@ table.cmp td,table.cmp th{text-align:left}
     <ul>
       <li>份數從付款完成起算，期限內用完。再買一次會加上新份數，舊份數的期限也一起延長。</li>
       <li>進階版從付款完成起算；已經是進階版時再購買會往後延長。</li>
-      <li>月費方案只收信用卡；其他方案可用信用卡或 ATM 轉帳（ATM 轉帳完成後才會開通）。</li>
-      <li><b>學校採購、需要報價單／收據／發票、要用匯款：</b>請來信 <span id="sup"></span>，付款後由我們手動開通。</li>
+      <li>進階版 1 個月、批次簽名 300 份只收信用卡；其他方案可用信用卡或 ATM 轉帳（ATM 轉帳完成後才會開通）。</li>
+      <li><b>學校採購、需要報價單／收據、要用匯款：</b>請來信 <span id="sup"></span>，付款後手動開通。本站為個人經營，沒有統一編號、無法開立統一發票。</li>
       <li>屬於數位服務，退款規定請看<a href="terms.html">服務條款與退款</a>。</li>
     </ul>
   </div>
@@ -53,12 +55,12 @@ const esc = App.esc; document.getElementById('sup').textContent = App.config.sup
 function toast(m) { const t = document.getElementById('toast'); t.textContent = m; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 5000); }
 const money = n => 'NT$ ' + Number(n).toLocaleString('zh-TW');
 App.api('/api/config').then(c => {
-  fq.textContent = Math.min(...Object.values(c.free_quota)); fd.textContent = c.free_doc_credits; fr.textContent = c.free_retain_days;
+  fq.textContent = Math.min(...Object.values(c.free_quota)); fb.textContent = c.free_batch_files || 10; fd.textContent = c.free_doc_credits; fr.textContent = c.free_retain_days;
   const all = Object.entries(c.plans);
   const card = ([k, p]) => {
     const per = p.credits ? `<div class="per">每份約 ${(p.price / p.credits).toFixed(2)} 元・${p.credit_days || 365} 天內用完${p.pro_days ? '・含進階版' : ''}</div>` : `<div class="per">${p.pro_days >= 360 ? `平均每月約 ${Math.round(p.price / 12)} 元` : `${p.pro_days} 天`}</div>`;
     const desc = p.credits ? `${p.credits.toLocaleString()} 份文件的線上簽名：上傳、產生簽名網址名單、學生簽名回傳、退回重簽、打包下載；資料最長保存 ${c.max_retain_days} 天。${p.pro_days ? '另含編輯器進階版 1 年。' : ''}`
-      : '掃描檔文字辨識、Word／Excel／PPT 轉檔不限次數。';
+      : '掃描檔文字辨識、Word／Excel／PPT 轉檔不限次數，批次轉檔不限檔案數。';
     const best = k === 'sign1000' ? '<span class="tag">學校最常選</span><br>' : '';
     return `<div class="card">${best}<h3 style="margin:0 0 4px">${esc(p.name)}</h3><div class="price">${money(p.price)}</div>${per}<p class="small muted">${desc}</p>
       <button class="btn primary" data-plan="${k}" style="width:100%">購買</button></div>`;

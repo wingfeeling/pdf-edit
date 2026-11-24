@@ -1,4 +1,6 @@
-# PDF 線上編輯器
+# 凌的萬用pdf編輯器
+
+經營者：wingfeeling（個人經營）・客服信箱：wingfeeling@gmail.com
 ## 檔案說明
 
 ```
@@ -10,7 +12,8 @@ web/                網頁
   sign.html         學生簽名頁（要用名單上的 Email 登入才打得開）
   pricing.html      方案與購買
   account.html      我的帳號、試用次數、購買紀錄
-  ops.html          網站用量監控、學校匯款手動開通（只有 SITE_ADMINS 看得到）
+  ops.html          管理後台：用量總覽、帳號權限（手動開通／停用）、許願池・客服訊息、訂單・退款（只有 OWNER_EMAILS 看得到）
+  wish.html         許願池・客服（使用者留言，管理後台回覆）
   privacy.html      隱私權政策範本
   terms.html        服務條款與退款政策範本
   js/config.js      ← 要改：Firebase 網頁設定
@@ -19,14 +22,45 @@ worker/
   schema.sql        資料表結構（參考用，不用手動執行）
 ```
 
+## ⚠️ Google 登入出現 auth/unauthorized-domain 或登入視窗閃退
+
+這不是程式的問題，是 Firebase 還不認得你網站的網址。設定一次就好：
+
+1. 打開 https://console.firebase.google.com → 選專案 **pdf-editor-54ab7**
+2. 左邊「Build／建構」→ **Authentication** → 上方「**設定（Settings）**」→「**授權網域（Authorized domains）**」
+3. 按「**新增網域**」，填入網站的網域（**只填網域，不要 https://、不要斜線**），例如：
+   - `pdf-editor.你的帳號.workers.dev`（Cloudflare 給的網址，到 Cloudflare 主控台 → Workers 和 Pages → pdf-editor 可以看到）
+   - 有自己的網域的話也要加，例如 `pdf.example.com`、`www.pdf.example.com`
+4. 存檔後等 1～5 分鐘，重新整理網頁再登入
+
+另外：LINE、Facebook、Instagram 裡面開的網頁不能用 Google 登入（Google 的規定），請使用者改用 Chrome／Safari 開。現在網站會自動提示。
+
 ## 祕密（在 Cloudflare 主控台設定，不要放 GitHub）
 
 Workers 和 Pages → pdf-editor → 設定 → 變數和祕密，類型選「祕密」：
 
-- `SITE_ADMINS`：可以看用量監控頁的 Gmail
+- （可以不設）`SITE_ADMINS`：管理後台的 Gmail。現在改成寫在 wrangler.toml 的 `OWNER_EMAILS`，已經填好 wingfeeling@gmail.com
 - `ECPAY_HASH_KEY`、`ECPAY_HASH_IV`：綠界金鑰
 
-## 這一版的變更
+## 這一版的變更（2026/11）
+
+- 修正：登入失敗時不再「閃退」沒反應，會顯示原因（例如網域沒授權、在 LINE 裡開啟）。
+- 修正：一次下載多個檔案會被瀏覽器擋掉 → 多個檔案一律打包成一個 ZIP。
+- 修正：頁面很大＋高解析度轉圖片時，手機會轉出空白檔 → 自動降低解析度、失敗會顯示原因。
+- 新增：**批次轉檔**。轉檔視窗選「批次：一次選很多個 PDF」，或「其他格式轉成 PDF」一次選很多檔案。免費版一次最多 10 個（wrangler.toml 的 `FREE_BATCH_FILES`），超過要進階版。Word／Excel／PPT 每個檔案算一次免費次數。
+- 新增：**許願池・客服**（wish.html，參考 ar-pet）。使用者留言、填願意花多少錢；管理後台回覆後，使用者會看到「新回覆」。
+- 新增：**管理後台**（ops.html）：手動開通帳號權限（對方還沒登入過也可以，第一次登入時自動開通）、停用／修改、看許願池和客服訊息並回覆、訂單列表和「標記已退款」（會收回該訂單的權限）。
+- 網站名稱、經營者、客服信箱、服務條款、隱私權政策都填好了；沒有統一編號、沒有電話。
+- 價格調低（見 wrangler.toml 的 `PLANS`）：進階版 1 個月 49 元、1 年 390 元；批次簽名 300 份 190 元、1,000 份＋進階版 1 年 490 元、3,000 份＋進階版 1 年 990 元。
+
+## 退款怎麼做
+
+綠界不會自動幫你判斷要不要退款，要你自己操作：
+- **信用卡**：登入綠界廠商後台 → 信用卡收單 → 交易明細，找到這筆訂單按「退款」（或還沒請款時「取消授權」），錢會退回客人的信用卡。已扣的手續費通常不會退還給你。
+- **ATM 轉帳**：綠界沒有退款功能，要你自己把錢匯回給客人。
+- 退完後到本站「管理後台 → 訂單・退款」按「標記已退款」，系統會收回這筆訂單給的天數和份數。
+
+## 之前的變更
 
 - 編輯器加字、改字時可以選字體：12 種內建字體（思源黑體、思源宋體、霞鶩文楷、芫荽、粉圓等，每台電腦都一樣）、自動偵測電腦裡的常見字體（標楷體、微軟正黑體、新細明體、蘋方等）；Chrome／Edge 可以讀取電腦裡的全部字體，其他瀏覽器可以輸入字體名稱。匯出 PDF 時照畫面上的字體畫進去，對方沒有這個字體也看得到。
 - 拿掉群發信件（不再需要 Resend／Brevo）。管理頁改成「姓名・Email・簽名網址」名單，可以複製貼到 Excel／Google 試算表，或下載 CSV，自己用學校信箱、LINE 發出。學生要用名單上的 Email 登入才打得開。

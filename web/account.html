@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-Hant-TW">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的帳號</title><link rel="stylesheet" href="css/site.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的帳號｜凌的萬用pdf編輯器</title><link rel="stylesheet" href="css/site.css"></head>
 <body>
 <div id="siteHeader"></div>
 <div class="wrap narrow">
@@ -8,7 +8,7 @@
   <div id="box" class="card muted">載入中…</div>
   <h2>購買紀錄</h2>
   <div class="card"><table class="t"><thead><tr><th>訂單編號</th><th>方案</th><th>金額</th><th>狀態</th><th>時間</th></tr></thead><tbody id="orders"></tbody></table></div>
-  <div class="row"><a class="btn" id="ops" href="ops.html" style="display:none">網站用量監控</a><button class="btn" id="out">登出</button></div>
+  <div class="row"><a class="btn" id="ops" href="ops.html" style="display:none">管理後台</a><a class="btn" href="wish.html?t=bug">客服・問題回報</a><button class="btn" id="out">登出</button></div>
 </div>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
@@ -16,7 +16,7 @@
 <script>
 App.header('account.html'); const esc = App.esc;
 const NAMES = { ocr: '掃描文字辨識', convert: 'Word／Excel／PPT 轉檔' };
-const STS = { created: '尚未付款', paid: '付款成功', failed: '付款失敗' };
+const STS = { created: '尚未付款', paid: '付款成功', failed: '付款失敗', refunded: '已退款' };
 const order = new URLSearchParams(location.search).get('order');
 async function load(tries = 0) {
   await App.ready;

@@ -34,18 +34,25 @@ enabled = true
 
 # 公開設定（不是祕密，可以放在 GitHub 上）。改這裡 → 推上 GitHub → 自動生效
 [vars]
-SITE_NAME = "PDF 線上編輯器"
+SITE_NAME = "凌的萬用pdf編輯器"
 SITE_URL = ""                                   # 留空 = 自動用目前的網址。之後有自己的網域，填 "https://你的網域"
 FIREBASE_PROJECT_ID = "pdf-editor-54ab7"   # 跟 web/js/config.js 的 projectId 一樣
-SUPPORT_EMAIL = "你的客服信箱"
+SUPPORT_EMAIL = "wingfeeling@gmail.com"
+OWNER_NAME = "wingfeeling"
+OWNER_NOTE = "此網站為個人經營，回覆較慢請見諒。"
+# 管理後台（ops.html）可以登入的 Google 帳號，多個用逗號分開。Email 不是祕密，放這裡比較好改；舊的祕密 SITE_ADMINS 也還能用
+OWNER_EMAILS = "wingfeeling@gmail.com"
 
 # ===== 方案與價格（元、天數）=====
 # pro_days = 進階版天數；credits = 批次簽名份數；credit_days = 份數要在幾天內用完
 # pay = "Credit" 代表只收信用卡（小額方案用，ATM 每筆最低手續費 15 元不划算）
-PLANS = '{"pro_m":{"name":"進階版 1 個月","price":99,"pro_days":31,"pay":"Credit"},"pro_y":{"name":"進階版 1 年","price":790,"pro_days":366},"sign300":{"name":"批次簽名 300 份","price":390,"credits":300,"credit_days":365},"sign1000":{"name":"批次簽名 1,000 份＋進階版 1 年","price":990,"credits":1000,"credit_days":365,"pro_days":366},"sign3000":{"name":"批次簽名 3,000 份＋進階版 1 年","price":2490,"credits":3000,"credit_days":365,"pro_days":366}}'
+# 2026/11 參考：iLovePDF 年繳約 US$60、Sejda 年繳 US$63、Smallpdf 每月 US$12～15 → 下面都比它們便宜。
+# 綠界信用卡手續費約 2.75%，最小的 49 元方案扣完手續費還有賺，不會虧。
+PLANS = '{"pro_m":{"name":"進階版 1 個月","price":49,"pro_days":31,"pay":"Credit"},"pro_y":{"name":"進階版 1 年","price":390,"pro_days":366},"sign300":{"name":"批次簽名 300 份","price":190,"credits":300,"credit_days":365,"pay":"Credit"},"sign1000":{"name":"批次簽名 1,000 份＋進階版 1 年","price":490,"credits":1000,"credit_days":365,"pro_days":366},"sign3000":{"name":"批次簽名 3,000 份＋進階版 1 年","price":990,"credits":3000,"credit_days":365,"pro_days":366}}'
 
 # ===== 免費試用 =====
 FREE_QUOTA = '{"ocr":10,"convert":10}'   # 每個月：掃描文字辨識、Word/Excel/PPT 轉檔各幾次（每月 1 日重算）
+FREE_BATCH_FILES = "10"          # 批次轉檔：免費版一次最多幾個檔案，超過要進階版
 FREE_DOC_CREDITS = "30"          # 每個帳號可以免費試用幾份批次簽名（一次性）
 FREE_MAX_BATCHES = "2"           # 試用時最多同時幾個批次
 FREE_RETAIN_DAYS = "14"          # 試用批次最多保存幾天（到期自動刪除）
@@ -68,5 +75,5 @@ DEV_AUTH = "off"
 
 # 祕密不要寫在這裡！到 Cloudflare 主控台 → Workers 和 Pages → pdf-editor → 設定 → 變數和祕密 → 新增，類型選「祕密」：
 #   ECPAY_HASH_KEY、ECPAY_HASH_IV：綠界的 HashKey / HashIV
-#   SITE_ADMINS：可以看「網站用量監控」頁、手動開通的 Google 帳號 Email，多個用逗號分開
+#   SITE_ADMINS：（可以不設）跟上面的 OWNER_EMAILS 一樣，能進管理後台的 Email
 # 祕密存在 Cloudflare 上，自動部署不會清掉它們。
