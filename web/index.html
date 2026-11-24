@@ -21,10 +21,10 @@
   <h2>免費與付費</h2>
   <div class="card"><table class="t"><thead><tr><th>功能</th><th>免費</th><th>付費</th></tr></thead><tbody>
     <tr><td>改字、簽名、印章、表單、拆分合併、轉正、PDF 轉 JPG／圖片轉 PDF</td><td>無限使用</td><td>無限使用</td></tr>
-    <tr><td>掃描檔文字辨識</td><td id="qOcr">試用</td><td>無限使用</td></tr>
-    <tr><td>Word／Excel／PPT 轉檔</td><td id="qConv">試用</td><td>無限使用</td></tr>
+    <tr><td>掃描檔文字辨識</td><td id="qOcr">無限使用</td><td>無限使用</td></tr>
+    <tr><td>Word／Excel／PPT 轉檔</td><td id="qConv">無限使用</td><td>無限使用</td></tr>
     <tr><td>批次轉檔（一次轉多個檔案）</td><td id="qBf">一次 10 個以內</td><td>不限檔案數</td></tr>
-    <tr><td>批次線上簽名</td><td id="qBatch">試用</td><td>按份數購買，一年內用完</td></tr>
+    <tr><td>批次線上簽名</td><td id="qBatch">試用</td><td>按份數購買，有簽名才算；進階版不限保存天數</td></tr>
   </tbody></table><p class="small muted">進階功能需要用 Google 帳號登入。<a href="pricing.html">看方案與價格</a></p></div>
 </div>
 <footer><a href="privacy.html">隱私權政策</a><a href="terms.html">服務條款與退款</a><a href="pricing.html">方案與價格</a><a href="wish.html">許願池・客服</a></footer>
@@ -32,5 +32,5 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="js/config.js"></script><script src="js/app.js"></script>
 <script>App.header('index.html');
-App.api('/api/config').then(c => { const q = c.free_quota || {}; if (q.ocr) qOcr.textContent = `每月 ${q.ocr} 次`; if (q.convert) qConv.textContent = `每月 ${q.convert} 次`; if (c.free_batch_files) qBf.textContent = `一次 ${c.free_batch_files} 個以內`; if (c.free_doc_credits) qBatch.textContent = `試用 ${c.free_doc_credits} 份`; }).catch(() => { });</script>
+App.api('/api/config').then(c => { const q = c.free_quota || {}; if (q.ocr > 0) qOcr.textContent = `每月 ${q.ocr} 次`; if (q.convert > 0) qConv.textContent = `每月 ${q.convert} 次`; if (c.free_batch_files) qBf.textContent = `一次 ${c.free_batch_files} 個以內`; if (c.free_doc_credits) qBatch.textContent = `試用 ${c.free_doc_credits} 份，保存 ${c.free_retain_days} 天`; }).catch(() => { });</script>
 </body></html>

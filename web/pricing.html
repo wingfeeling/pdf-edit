@@ -13,24 +13,31 @@ table.cmp td,table.cmp th{text-align:left}
 <div id="siteHeader"></div>
 <div class="wrap">
   <h1>方案與價格</h1>
-  <p class="sub">不用月費也能用：編輯器的基本功能永久免費；批次線上簽名用多少買多少，一年內用完就好。付款由綠界科技處理，本站不會經手你的信用卡資料。</p>
+  <p class="sub">不用月費也能用：編輯器、文字辨識、Word／Excel／PPT 轉檔都免費、不限次數；批次線上簽名用多少買多少，而且<b>有簽名才算份數</b>。付款由綠界科技處理，本站不會經手你的信用卡資料。</p>
   <div class="notice info">本站為個人經營、使用免費的雲端服務架設，所以價格比國外同類網站（例如 iLovePDF、Smallpdf、Sejda 的付費方案）都便宜很多。</div>
 
   <h2>免費就能用</h2>
   <div class="card">
     <table class="t cmp"><tbody>
       <tr><th style="width:34%">PDF 編輯（改字、簽名、印章、表單、合併、拆分、轉正、轉圖片）</th><td>永久免費、不限次數</td></tr>
-      <tr><th>掃描檔文字辨識、Word／Excel／PPT 轉檔</th><td>每個月各 <b id="fq"></b> 次（每月 1 日重新計算）</td></tr>
+      <tr><th>掃描檔文字辨識、Word／Excel／PPT 轉檔</th><td>永久免費、不限次數</td></tr>
       <tr><th>批次轉檔</th><td>一次最多 <b id="fb"></b> 個檔案（進階版不限）</td></tr>
-      <tr><th>批次線上簽名</th><td>每個帳號免費試用 <b id="fd"></b> 份，試用批次保存 <b id="fr"></b> 天</td></tr>
+      <tr><th>批次線上簽名</th><td>每個帳號免費試用 <b id="fd"></b> 份（有簽名才算），試用的檔案保存 <b id="fr"></b> 天</td></tr>
     </tbody></table>
   </div>
 
   <h2>批次線上簽名（按份數）</h2>
-  <p class="small muted">每上傳一份要給學生簽名的文件算 1 份；退回重簽不另外計算。還沒發出就刪掉的文件會退回份數。</p>
+  <div class="card small" style="margin-bottom:12px"><b>有簽名才算份數</b>
+    <ul style="margin:6px 0 0">
+      <li>上傳一份文件時先<b>預留</b> 1 份，學生簽好回傳才真正算掉。</li>
+      <li>學生沒簽，你刪除這份文件、或批次到期自動刪除時，預留的份數會<b>自動退回</b>。</li>
+      <li>退回重簽、學生重新簽名，都不會再多算。</li>
+      <li>例：上傳 300 份，最後 280 人簽名 → 只算 280 份，另外 20 份退回。</li>
+    </ul></div>
   <div id="signPlans" class="plans"></div>
 
-  <h2>進階版（編輯器不限次數）</h2>
+  <h2>進階版</h2>
+  <p class="small muted">批次轉檔不限檔案數；批次簽名的檔案不限保存天數（進階版到期 <b id="gd"></b> 天後才刪除，續約就繼續保存）。</p>
   <div id="proPlans" class="plans"></div>
 
   <div class="card small muted" style="margin-top:18px">
@@ -55,12 +62,12 @@ const esc = App.esc; document.getElementById('sup').textContent = App.config.sup
 function toast(m) { const t = document.getElementById('toast'); t.textContent = m; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 5000); }
 const money = n => 'NT$ ' + Number(n).toLocaleString('zh-TW');
 App.api('/api/config').then(c => {
-  fq.textContent = Math.min(...Object.values(c.free_quota)); fb.textContent = c.free_batch_files || 10; fd.textContent = c.free_doc_credits; fr.textContent = c.free_retain_days;
+  gd.textContent = c.pro_grace_days || 30; fb.textContent = c.free_batch_files || 10; fd.textContent = c.free_doc_credits; fr.textContent = c.free_retain_days;
   const all = Object.entries(c.plans);
   const card = ([k, p]) => {
     const per = p.credits ? `<div class="per">每份約 ${(p.price / p.credits).toFixed(2)} 元・${p.credit_days || 365} 天內用完${p.pro_days ? '・含進階版' : ''}</div>` : `<div class="per">${p.pro_days >= 360 ? `平均每月約 ${Math.round(p.price / 12)} 元` : `${p.pro_days} 天`}</div>`;
-    const desc = p.credits ? `${p.credits.toLocaleString()} 份文件的線上簽名：上傳、產生簽名網址名單、學生簽名回傳、退回重簽、打包下載；資料最長保存 ${c.max_retain_days} 天。${p.pro_days ? '另含編輯器進階版 1 年。' : ''}`
-      : '掃描檔文字辨識、Word／Excel／PPT 轉檔不限次數，批次轉檔不限檔案數。';
+    const desc = p.credits ? `${p.credits.toLocaleString()} 份文件的線上簽名：上傳、產生簽名網址名單、學生簽名回傳、退回重簽、打包下載；有簽名才算份數。${p.pro_days ? '另含進階版 1 年：檔案不限保存天數、批次轉檔不限檔案數。' : `檔案最長保存 ${c.max_retain_days} 天。`}`
+      : `批次轉檔一次不限檔案數（免費版一次 ${c.free_batch_files || 10} 個）；批次簽名的檔案不限保存天數（免費試用 ${c.free_retain_days} 天、只買份數 ${c.max_retain_days} 天）。`;
     const best = k === 'sign1000' ? '<span class="tag">學校最常選</span><br>' : '';
     return `<div class="card">${best}<h3 style="margin:0 0 4px">${esc(p.name)}</h3><div class="price">${money(p.price)}</div>${per}<p class="small muted">${desc}</p>
       <button class="btn primary" data-plan="${k}" style="width:100%">購買</button></div>`;

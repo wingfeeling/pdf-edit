@@ -8,7 +8,8 @@
  *  - 每日排程：刪除過期批次
  *  - 網頁（web 資料夾）也由這個 Worker 一起提供，網頁和後端同一個網址
  *
- * 綁定：DB (D1)、ASSETS（網頁）；FILES (R2) 可有可無——沒有 R2 時，PDF 切塊存進 D1（不用綁信用卡）。設定值見 wrangler.toml 的 [vars] 與 README。
+ * 綁定：DB (D1)、ASSETS（網頁）；FILES (R2) 可有可無——有 R2 就存 R2，沒有 R2 時 PDF 切塊存進 D1。
+ *       從 D1 改成 R2 後，舊檔案照樣讀得到，排程會自動把它們搬到 R2。設定值見 wrangler.toml 的 [vars] 與 README。
  * 資料表會在第一次有人連線時自動建立，不用另外執行 schema.sql。
  */
 
@@ -99,10 +100,11 @@ const isSiteAdmin = (u, env) => !!u && !!u.email && u.email_verified !== false &
 
 /* ============================== 方案、簽名份數與試用 ==============================
  * 兩種商品：
- *  1. 進階版（pro_days）：編輯器的掃描文字辨識、Office 轉檔不限次數。免費版每月各有 FREE_QUOTA 次。
- *  2. 批次簽名份數（credits）：每上傳一份要簽名的文件扣 1 份，買了 credit_days 天內用完。
+ *  1. 進階版（pro_days）：批次轉檔不限檔案數；批次簽名的檔案在進階版期間不限保存天數
+ *     （進階版到期 PRO_GRACE_DAYS 天後才刪除）。掃描文字辨識、Office 轉檔免費版也不限次數（FREE_QUOTA 填 0 = 不限）。
+ *  2. 批次簽名份數（credits）：「有簽名才算份數」——上傳時先預留 1 份，學生簽好才真正算掉；
+ *     沒簽就刪除、或批次到期自動刪除，預留的份數會退回。退回重簽不另外算。
  *     免費試用 FREE_DOC_CREDITS 份（每個帳號一次），試用批次最多保存 FREE_RETAIN_DAYS 天。
- *  還沒寄出就刪掉的文件會把份數還回去。
  */
 const DEFAULT_PLANS = {
   pro_m: { name: '進階版 1 個月', price: 49, pro_days: 31, pay: 'Credit' },
@@ -113,7 +115,8 @@ const DEFAULT_PLANS = {
 };
 const freeBatchFiles = env => intVar(env, 'FREE_BATCH_FILES', 10);   // 批次轉檔：免費版一次最多幾個檔案，超過要進階版
 function plans(env) { return jsonVar(env, 'PLANS', DEFAULT_PLANS); }
-function freeQuota(env) { return jsonVar(env, 'FREE_QUOTA', { ocr: 10, convert: 10 }); }   // 每個月重新計算
+function freeQuota(env) { return jsonVar(env, 'FREE_QUOTA', { ocr: 0, convert: 0 }); }   // 每個月重新計算；0 = 不限次數
+const proGraceDays = env => intVar(env, 'PRO_GRACE_DAYS', 30);
 async function account(u, env) {
   const row = (await env.DB.prepare('SELECT * FROM users WHERE uid = ?').bind(u.uid).first()) || {};
   const paidUntil = row.paid_until || 0; const pro = paidUntil > now();
@@ -122,11 +125,17 @@ async function account(u, env) {
   const used = {}; const q = freeQuota(env);
   const { results } = await env.DB.prepare('SELECT feature, COUNT(*) AS n FROM usage WHERE uid = ? AND trial = 1 AND created_at >= ? GROUP BY feature').bind(u.uid, twMonthStart()).all();
   for (const r of results) used[r.feature] = r.n;
-  const quota = {}; for (const f of Object.keys(q)) quota[f] = { limit: q[f], used: used[f] || 0, remaining: Math.max(0, q[f] - (used[f] || 0)), monthly: true };
+  const quota = {}; for (const f of Object.keys(q)) quota[f] = q[f] > 0 ? { limit: q[f], used: used[f] || 0, remaining: Math.max(0, q[f] - (used[f] || 0)), monthly: true }
+    : { limit: null, used: used[f] || 0, remaining: null, unlimited: true };
+  // 預留中的份數：已上傳、學生還沒簽的文件（沒簽就會退回）
+  const held = { trial: 0, paid: 0 };
+  const hr = await env.DB.prepare('SELECT credit, COUNT(*) AS n FROM docs WHERE owner_uid = ? AND COALESCE(charged, 0) = 0 AND credit IS NOT NULL GROUP BY credit').bind(u.uid).all();
+  for (const r of hr.results) if (r.credit in held) held[r.credit] = r.n;
   return {
     uid: u.uid, email: u.email, name: u.name, paid: pro, paid_until: paidUntil || null, quota,
     credits: { paid: creditsLive ? (row.doc_credits || 0) : 0, paid_until: creditsLive ? row.credits_until : null, expired: !creditsLive && (row.doc_credits || 0) > 0 ? row.doc_credits : 0,
-      trial: Math.max(0, trialLimit - (row.trial_docs || 0)), trial_limit: trialLimit },
+      trial: Math.max(0, trialLimit - (row.trial_docs || 0)), trial_limit: trialLimit, held_paid: held.paid, held_trial: held.trial },
+    keep: keepRule(env, pro, creditsLive && (row.doc_credits || 0) + held.paid > 0),
     batch_files: pro ? null : freeBatchFiles(env),
     site_admin: isSiteAdmin(u, env)
   };
@@ -141,6 +150,7 @@ async function consume(u, env, feature, count = 1) {
   if (acc.paid) { await log(0, count); return { ok: true, paid: true }; }
   const lim = freeBatchFiles(env);
   if (count > lim) throw new HttpError(402, `免費版一次最多批次轉 ${lim} 個檔案，這次選了 ${count} 個。開通進階版就能一次轉更多（不限次數），或分成每次 ${lim} 個以內轉`, { need_pay: true, feature, batch_limit: lim });
+  if (acc.quota[feature].unlimited) { await log(1, count); return { ok: true, paid: false, unlimited: true }; }
   const left = acc.quota[feature].remaining;
   if (left < count) throw new HttpError(402, left <= 0 ? `這個月的免費次數（${q[feature]} 次）已經用完，下個月 1 日會重新計算；開通進階版就不限次數`
     : `這個月的免費次數只剩 ${left} 次，這次要轉 ${count} 個檔案。請減少檔案數，或開通進階版就不限次數`, { need_pay: true, feature, remaining: left });
@@ -172,7 +182,21 @@ async function refundCredit(env, uid, kind) {
   if (kind === 'trial') await env.DB.prepare('UPDATE users SET trial_docs = MAX(0, COALESCE(trial_docs, 0) - 1) WHERE uid = ?').bind(uid).run();
   else if (kind === 'paid') await env.DB.prepare('UPDATE users SET doc_credits = COALESCE(doc_credits, 0) + 1 WHERE uid = ?').bind(uid).run();
 }
-const refundable = d => d.status === 'pending' && !d.sent_count && !d.sent_at;
+// 有簽名才算份數：學生還沒簽過（charged = 0）的文件，刪除或到期時退回預留的份數
+const refundable = d => !d.charged && !!d.credit;
+/* 保存天數：進階版不限（forever）；有買份數最多 MAX_RETAIN_DAYS 天；免費試用最多 FREE_RETAIN_DAYS 天 */
+function keepRule(env, pro, paidCredits) {
+  if (pro) return { forever: true, max_days: null, grace_days: proGraceDays(env) };
+  return { forever: false, max_days: paidCredits ? intVar(env, 'MAX_RETAIN_DAYS', 180) : intVar(env, 'FREE_RETAIN_DAYS', 7) };
+}
+function batchKeep(env, acc, trialBatch, want, base, current) {
+  const rule = keepRule(env, acc.paid, !trialBatch);
+  if (want === 'forever') { if (rule.forever) return null; throw new HttpError(402, '「不限保存天數」是進階版的功能', { need_pay: true }); }
+  const floor = now() + DAY;
+  if (rule.forever) return Math.max(floor, +want || now() + 90 * DAY);
+  const cap = Math.max(floor, base + rule.max_days * DAY, current || 0);   // 不能超過上限（已經設定的日期可以保留）
+  return Math.max(floor, Math.min(cap, +want || cap));
+}
 /* 付款成功或管理者手動開通：加進階版天數、加份數（新份數的期限會把舊份數一起延長） */
 function grantStmts(env, uid, { pro_days, credits, credit_days }, reason, ref) {
   const t = now(); const s = [];
@@ -227,7 +251,7 @@ async function filePut(env, key, buf) {
   await db.batch(st);   // 一次寫入，全部成功或全部失敗
 }
 async function fileGet(env, key) {
-  if (env.FILES) return env.FILES.get(key);
+  if (env.FILES) { const o = await env.FILES.get(key); if (o) return o; }   // 改用 R2 以前存在 D1 的舊檔案，還沒搬完時從 D1 讀
   const db = fileDb(env);
   const { results } = await db.prepare('SELECT part FROM files WHERE key = ? ORDER BY part').bind(key).all();
   if (!results.length) return null;
@@ -243,21 +267,43 @@ async function fileGet(env, key) {
 }
 async function deleteKeys(env, keys) {
   keys = keys.filter(Boolean); if (!keys.length) return;
-  if (env.FILES) { for (let i = 0; i < keys.length; i += 900) await env.FILES.delete(keys.slice(i, i + 900)); return; }
-  const db = fileDb(env);
+  if (env.FILES) for (let i = 0; i < keys.length; i += 900) await env.FILES.delete(keys.slice(i, i + 900));
+  const db = fileDb(env);   // D1 裡可能還有改用 R2 前的舊檔案，一起刪
   for (let i = 0; i < keys.length; i += 50) { const k = keys.slice(i, i + 50); await db.prepare(`DELETE FROM files WHERE key IN (${k.map(() => '?').join(',')})`).bind(...k).run(); }
 }
 // 檔案空間上限：R2 用 GB 設定；存在 D1 時用 MB 設定（D1 免費版每個資料庫最大 500 MB）
 function storageLimits(env) {
   const num = (k, d) => { const v = parseFloat(env[k]); return Number.isFinite(v) ? v : d; };
-  if (env.FILES) return { mode: 'r2', limit: num('R2_FREE_GB', 10) * 1073741824, guard: num('TRIAL_STORAGE_GUARD_GB', 8) * 1073741824, hard: 0 };
+  if (env.FILES) return { mode: 'r2', limit: num('R2_FREE_GB', 10) * 1073741824, guard: num('TRIAL_STORAGE_GUARD_GB', 8) * 1073741824, hard: num('R2_MAX_GB', 50) * 1073741824 };
   const limit = num('D1_FILE_LIMIT_MB', 450) * 1048576;
   return { mode: 'd1', limit, guard: num('D1_TRIAL_GUARD_MB', 300) * 1048576, hard: limit };
 }
+/* 刪除整個批次（手動刪除或到期）：學生還沒簽的文件，預留的份數退回給承辦人 */
+/* 從 D1 搬到 R2：一次搬幾個檔案，用串流一塊一塊寫，不占記憶體。排程每小時執行，搬完就沒事做 */
+async function migrateToR2(env, maxKeys = 40) {
+  if (!env.FILES) return 0;
+  const db = fileDb(env); let moved = 0;
+  const { results } = await db.prepare('SELECT key, SUM(LENGTH(data)) AS n FROM files GROUP BY key LIMIT ?').bind(maxKeys).all();
+  for (const { key, n } of results) {
+    try {
+      const parts = (await db.prepare('SELECT part FROM files WHERE key = ? ORDER BY part').bind(key).all()).results.map(r => r.part);
+      const { readable, writable } = new FixedLengthStream(n || 0); const w = writable.getWriter();
+      const pump = (async () => { for (const part of parts) { const r = await db.prepare('SELECT data FROM files WHERE key = ? AND part = ?').bind(key, part).first(); if (r && r.data) await w.write(new Uint8Array(r.data)); } await w.close(); })();
+      await Promise.all([env.FILES.put(key, readable, { httpMetadata: { contentType: 'application/pdf' } }), pump]);
+      await db.prepare('DELETE FROM files WHERE key = ?').bind(key).run(); moved++;
+    } catch (e) { console.error('migrate', key, e); }
+  }
+  return moved;
+}
 async function deleteBatch(env, b) {
-  const { results } = await env.DB.prepare('SELECT orig_key, signed_key FROM docs WHERE batch_id = ?').bind(b.id).all();
+  const { results } = await env.DB.prepare('SELECT orig_key, signed_key, credit, charged FROM docs WHERE batch_id = ?').bind(b.id).all();
   await deleteKeys(env, results.flatMap(r => [r.orig_key, r.signed_key]));
-  await env.DB.batch([env.DB.prepare('DELETE FROM docs WHERE batch_id = ?').bind(b.id), env.DB.prepare('DELETE FROM batches WHERE id = ?').bind(b.id)]);
+  const back = { trial: 0, paid: 0 }; for (const d of results) if (refundable(d) && d.credit in back) back[d.credit]++;
+  const st = [env.DB.prepare('DELETE FROM docs WHERE batch_id = ?').bind(b.id), env.DB.prepare('DELETE FROM batches WHERE id = ?').bind(b.id)];
+  if (back.trial) st.push(env.DB.prepare('UPDATE users SET trial_docs = MAX(0, COALESCE(trial_docs, 0) - ?) WHERE uid = ?').bind(back.trial, b.owner_uid));
+  if (back.paid) st.push(env.DB.prepare('UPDATE users SET doc_credits = COALESCE(doc_credits, 0) + ? WHERE uid = ?').bind(back.paid, b.owner_uid));
+  await env.DB.batch(st);
+  return back.trial + back.paid;
 }
 function fileResponse(obj, name, req, env, inline = true) {
   const h = new Headers(corsHeaders(req, env));
@@ -300,8 +346,8 @@ async function route(req, env, ctx) {
   let m;
 
   if (p === '/api/health') return J({ ok: true, time: now() });
-  if (p === '/api/config' && M === 'GET') return J({ plans: plans(env), free_quota: freeQuota(env), free_doc_credits: intVar(env, 'FREE_DOC_CREDITS', 30), free_retain_days: intVar(env, 'FREE_RETAIN_DAYS', 14),
-    free_max_batches: intVar(env, 'FREE_MAX_BATCHES', 2), free_batch_files: freeBatchFiles(env), owner: env.OWNER_NAME || '', owner_note: env.OWNER_NOTE || '', max_retain_days: intVar(env, 'MAX_RETAIN_DAYS', 180), max_pdf_mb: intVar(env, 'MAX_PDF_MB', 10), site_name: env.SITE_NAME || '', support_email: env.SUPPORT_EMAIL || '' });
+  if (p === '/api/config' && M === 'GET') return J({ plans: plans(env), free_quota: freeQuota(env), free_doc_credits: intVar(env, 'FREE_DOC_CREDITS', 30), free_retain_days: intVar(env, 'FREE_RETAIN_DAYS', 7),
+    free_max_batches: intVar(env, 'FREE_MAX_BATCHES', 2), free_batch_files: freeBatchFiles(env), pro_grace_days: proGraceDays(env), owner: env.OWNER_NAME || '', owner_note: env.OWNER_NOTE || '', max_retain_days: intVar(env, 'MAX_RETAIN_DAYS', 180), max_pdf_mb: intVar(env, 'MAX_PDF_MB', 10), site_name: env.SITE_NAME || '', support_email: env.SUPPORT_EMAIL || '' });
 
   /* ---------- 帳號 ---------- */
   if (p === '/api/me' && M === 'GET') {
@@ -335,7 +381,7 @@ async function route(req, env, ctx) {
     const key = `b/${d.batch_id}/${d.id}/signed-${randId(6)}.pdf`;
     await filePut(env, key, buf);
     const ip = req.headers.get('CF-Connecting-IP') || '';
-    const r = await env.DB.prepare("UPDATE docs SET status = 'signed', signed_key = ?, signed_size = ?, signed_at = ?, signed_ip = ?, signed_email = ? WHERE id = ? AND status != 'signed'")
+    const r = await env.DB.prepare("UPDATE docs SET status = 'signed', charged = 1, signed_key = ?, signed_size = ?, signed_at = ?, signed_ip = ?, signed_email = ? WHERE id = ? AND status != 'signed'")
       .bind(key, buf.byteLength, now(), ip, d._viewer || '', d.id).run();
     if (!r.meta.changes) { await deleteKeys(env, [key]); throw new HttpError(409, '這份文件已經簽好了，不能再修改'); }
     return J({ ok: true, signed_at: now() });
@@ -357,12 +403,11 @@ async function route(req, env, ctx) {
       const open = await env.DB.prepare('SELECT COUNT(*) AS n FROM batches WHERE owner_uid = ? AND trial = 1').bind(u.uid).first();
       if (open.n >= intVar(env, 'FREE_MAX_BATCHES', 2)) throw new HttpError(402, `免費試用最多同時有 ${intVar(env, 'FREE_MAX_BATCHES', 2)} 個批次，請先刪除舊的試用批次，或購買簽名份數`, { need_pay: true });
     }
-    const maxKeep = paid ? intVar(env, 'MAX_RETAIN_DAYS', 180) : intVar(env, 'FREE_RETAIN_DAYS', 14);
-    const retain = Math.max(now() + DAY, Math.min(now() + maxKeep * DAY, +x.retain_until || now() + (paid ? 90 : maxKeep) * DAY));
+    const retain = batchKeep(env, acc, !paid, x.forever ? 'forever' : (x.retain_until || (acc.paid ? 'forever' : undefined)), now());
     const id = randId(9);
     await env.DB.prepare('INSERT INTO batches (id, owner_uid, name, org_name, message, deadline, require_login, retain_until, created_at, trial) VALUES (?,?,?,?,?,?,?,?,?,?)')
       .bind(id, u.uid, name, String(x.org_name || '').slice(0, 100), String(x.message || '').slice(0, 2000), +x.deadline || null, x.require_login === false ? 0 : 1, retain, now(), paid ? 0 : 1).run();
-    return J({ id, retain_until: retain, trial: !paid });
+    return J({ id, retain_until: retain, forever: retain === null, trial: !paid });
   }
   if ((m = p.match(/^\/api\/batches\/([^/]+)$/))) {
     const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]);
@@ -374,14 +419,17 @@ async function route(req, env, ctx) {
     }
     if (M === 'PATCH') {
       const x = await body(req);
+      if (x.forever || x.retain_until !== undefined) {
+        const acc = await account(u, env);
+        const r = batchKeep(env, acc, !!b.trial, x.forever ? 'forever' : x.retain_until, b.created_at, b.retain_until);
+        await env.DB.prepare('UPDATE batches SET retain_until = ? WHERE id = ?').bind(r, b.id).run();
+      }
       await env.DB.prepare('UPDATE batches SET name = COALESCE(?, name), org_name = COALESCE(?, org_name), message = COALESCE(?, message), deadline = COALESCE(?, deadline), require_login = COALESCE(?, require_login) WHERE id = ?')
         .bind(x.name ?? null, x.org_name ?? null, x.message ?? null, x.deadline ?? null, x.require_login == null ? null : (x.require_login ? 1 : 0), b.id).run();
       return J({ ok: true });
     }
     if (M === 'DELETE') {
-      const { results } = await env.DB.prepare('SELECT * FROM docs WHERE batch_id = ?').bind(b.id).all();
-      let back = 0; for (const d of results) if (refundable(d) && d.credit) { await refundCredit(env, u.uid, d.credit); back++; }
-      await deleteBatch(env, b); return J({ ok: true, refunded: back });
+      const back = await deleteBatch(env, b); return J({ ok: true, refunded: back });
     }
   }
   if ((m = p.match(/^\/api\/batches\/([^/]+)\/docs$/)) && M === 'POST') {
@@ -403,13 +451,13 @@ async function route(req, env, ctx) {
     const id = randId(9), token = randId(24), key = `b/${b.id}/${id}/orig.pdf`;
     try {
       await filePut(env, key, buf);
-      await env.DB.prepare("INSERT INTO docs (id, batch_id, owner_uid, filename, student_id, student_name, email, token, status, orig_key, orig_size, sent_count, created_at, credit) VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?, 0, ?, ?)")
+      await env.DB.prepare("INSERT INTO docs (id, batch_id, owner_uid, filename, student_id, student_name, email, token, status, orig_key, orig_size, sent_count, created_at, credit, charged) VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?, 0, ?, ?, 0)")
         .bind(id, b.id, u.uid, filename, String(meta.student_id || '').slice(0, 40), String(meta.student_name || '').slice(0, 60), normEmail(meta.email).slice(0, 200), token, key, buf.byteLength, now(), credit).run();
     } catch (e) { await refundCredit(env, u.uid, credit); try { await deleteKeys(env, [key]); } catch (e2) { } throw e; }
     const d = await env.DB.prepare('SELECT * FROM docs WHERE id = ?').bind(id).first();
     return J({ doc: docOut(env, d, req) });
   }
-  if ((m = p.match(/^\/api\/batches\/([^/]+)\/mark-sent$/)) && M === 'POST') {    // 匯出／複製名單後標記為「已發出」（之後刪除就不退份數）
+  if ((m = p.match(/^\/api\/batches\/([^/]+)\/mark-sent$/)) && M === 'POST') {    // 匯出／複製名單後標記為「已發出」（只是狀態，不影響份數）
     const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]); const x = await body(req);
     const ids = (Array.isArray(x.ids) ? x.ids : []).slice(0, 3000); const t = now();
     for (let i = 0; i < ids.length; i += 50) await env.DB.batch(ids.slice(i, i + 50).map(id => env.DB.prepare("UPDATE docs SET sent_at = COALESCE(sent_at, ?), sent_count = MAX(sent_count, 1), status = CASE WHEN status = 'pending' THEN 'sent' ELSE status END WHERE id = ? AND batch_id = ?").bind(t, id, b.id)));
@@ -425,7 +473,7 @@ async function route(req, env, ctx) {
     }
     if (M === 'DELETE') {
       await deleteKeys(env, [d.orig_key, d.signed_key]); await env.DB.prepare('DELETE FROM docs WHERE id = ?').bind(d.id).run();
-      const back = refundable(d) && d.credit ? (await refundCredit(env, u.uid, d.credit), true) : false;
+      const back = refundable(d) ? (await refundCredit(env, u.uid, d.credit), true) : false;
       return J({ ok: true, refunded: back });
     }
   }
@@ -627,6 +675,7 @@ async function admin(action, M, me, x, env) {
 
 /* ============================== 用量統計與排程 ============================== */
 async function siteStats(env) {
+  const warn0 = [];
   const one = async (sql, ...a) => (await env.DB.prepare(sql).bind(...a).first()) || {};
   const users = await one('SELECT COUNT(*) AS n, SUM(CASE WHEN paid_until > ? THEN 1 ELSE 0 END) AS paid, SUM(CASE WHEN last_seen > ? THEN 1 ELSE 0 END) AS active30 FROM users', now(), now() - 30 * DAY);
   const files = await one('SELECT COUNT(*) AS docs, COALESCE(SUM(orig_size),0) + COALESCE(SUM(signed_size),0) AS bytes, SUM(CASE WHEN status = \'signed\' THEN 1 ELSE 0 END) AS signed FROM docs');
@@ -636,11 +685,14 @@ async function siteStats(env) {
   const split = await one("SELECT COALESCE(SUM(CASE WHEN b.trial = 1 THEN COALESCE(d.orig_size,0) + COALESCE(d.signed_size,0) END),0) AS trial_bytes FROM docs d JOIN batches b ON b.id = d.batch_id");
   const credits = await one('SELECT COALESCE(SUM(doc_credits),0) AS open_credits, SUM(CASE WHEN credits_until > ? AND doc_credits > 0 THEN 1 ELSE 0 END) AS buyers FROM users WHERE credits_until > ?', now(), now());
   const lim = storageLimits(env), storageLimit = lim.limit, guard = lim.guard;
+  const d1left = env.FILES ? await (async () => (await fileDb(env).prepare('SELECT COUNT(DISTINCT key) AS n FROM files').first()) || {})() : {};
+  if (d1left.n) warn0.push(`還有 ${d1left.n} 個舊檔案在 D1，系統每小時會自動搬一批到 R2，不用處理`);
   const overGB = lim.mode === 'r2' ? Math.max(0, files.bytes - storageLimit) / 1073741824 : 0;
   const size = b => b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : (b / 1048576).toFixed(0) + ' MB';
-  const warn = [];
+  const warn = warn0;
+  if (lim.hard > storageLimit && files.bytes > lim.hard * 0.9) warn.push(`檔案空間快到你設定的上限 R2_MAX_GB（${size(lim.hard)}），滿了就不能再上傳`);
   if (files.bytes > storageLimit * 0.8) warn.push(lim.mode === 'r2'
-    ? `檔案空間已用 ${size(files.bytes)}，超過免費額度（${size(storageLimit)}）的 80%${overGB > 0 ? `；超出 ${overGB.toFixed(1)} GB，約每月 US$ ${(Math.ceil(overGB) * 0.015).toFixed(2)}` : ''}`
+    ? `檔案空間已用 ${size(files.bytes)}，超過 R2 免費額度（${size(storageLimit)}）的 80%${overGB > 0 ? `；超出 ${overGB.toFixed(1)} GB，Cloudflare 約每月收 US$ ${(Math.ceil(overGB) * 0.015).toFixed(2)}` : ''}`
     : `檔案空間已用 ${size(files.bytes)}，快到上限（${size(storageLimit)}）。滿了以後就不能再上傳新文件，請刪除不用的批次，或把保存天數調短`);
   if (guard > 0 && files.bytes > guard) warn.push(`總空間超過試用警戒線（${size(guard)}），免費試用的新上傳已暫停，付費客戶不受影響`);
   return { users, files: { ...files, ...split, storage: lim.mode, limit_bytes: storageLimit, trial_guard_bytes: guard, over_gb: overGB }, credits, batches, sales_this_month: sales, usage_30d: usage, warnings: warn, time: now() };
@@ -649,7 +701,11 @@ async function cron(env) {
   await ensureSchema(env);
   // 1) 刪除超過保存期限的批次（個資最小化）。快到期的批次會在管理頁上顯示提醒，不寄信
   const { results } = await env.DB.prepare('SELECT * FROM batches WHERE retain_until < ? LIMIT 50').bind(now()).all();
-  for (const b of results) { try { await deleteBatch(env, b); } catch (e) { console.error('purge', b.id, e); } }
+  // 2) 「不限保存天數」的批次：進階版到期超過 PRO_GRACE_DAYS 天還沒續約，就刪除
+  const lapsed = (await env.DB.prepare('SELECT b.* FROM batches b LEFT JOIN users u ON u.uid = b.owner_uid WHERE b.retain_until IS NULL AND COALESCE(u.paid_until, 0) < ? LIMIT 50').bind(now() - proGraceDays(env) * DAY).all()).results;
+  for (const b of [...results, ...lapsed]) { try { await deleteBatch(env, b); } catch (e) { console.error('purge', b.id, e); } }
+  // 3) 改用 R2 以後，把 D1 裡的舊檔案慢慢搬過去
+  try { await migrateToR2(env); } catch (e) { console.error('migrate', e); }
 }
 
 /* ============================== 自動建立資料表 ============================== */
@@ -662,7 +718,7 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, owner_uid TEXT NOT NULL, name TEXT, org_name TEXT, message TEXT, deadline INTEGER, require_login INTEGER DEFAULT 1, retain_until INTEGER, created_at INTEGER, trial INTEGER DEFAULT 0, warned INTEGER DEFAULT 0)`,
   `CREATE INDEX IF NOT EXISTS idx_batches_owner ON batches(owner_uid)`,
   `CREATE INDEX IF NOT EXISTS idx_batches_retain ON batches(retain_until)`,
-  `CREATE TABLE IF NOT EXISTS docs (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, owner_uid TEXT NOT NULL, filename TEXT, student_id TEXT, student_name TEXT, email TEXT, token TEXT UNIQUE NOT NULL, status TEXT NOT NULL, orig_key TEXT, orig_size INTEGER, signed_key TEXT, signed_size INTEGER, sent_at INTEGER, sent_count INTEGER DEFAULT 0, signed_at INTEGER, signed_ip TEXT, signed_email TEXT, return_reason TEXT, created_at INTEGER, credit TEXT)`,
+  `CREATE TABLE IF NOT EXISTS docs (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, owner_uid TEXT NOT NULL, filename TEXT, student_id TEXT, student_name TEXT, email TEXT, token TEXT UNIQUE NOT NULL, status TEXT NOT NULL, orig_key TEXT, orig_size INTEGER, signed_key TEXT, signed_size INTEGER, sent_at INTEGER, sent_count INTEGER DEFAULT 0, signed_at INTEGER, signed_ip TEXT, signed_email TEXT, return_reason TEXT, created_at INTEGER, credit TEXT, charged INTEGER DEFAULT 0)`,
   `CREATE INDEX IF NOT EXISTS idx_docs_batch ON docs(batch_id)`,
   `CREATE TABLE IF NOT EXISTS orders (trade_no TEXT PRIMARY KEY, uid TEXT NOT NULL, email TEXT, plan TEXT, amount INTEGER, days INTEGER, credits INTEGER DEFAULT 0, credit_days INTEGER DEFAULT 0, status TEXT, created_at INTEGER, paid_at INTEGER, ecpay_trade_no TEXT, payment_type TEXT, note TEXT)`,
   `CREATE INDEX IF NOT EXISTS idx_orders_uid ON orders(uid)`,
@@ -675,11 +731,17 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_pending_email ON pending_grants(email)`
 ];
 let schemaReady = null;
+/* 舊資料庫升級：docs 加 charged 欄位（有簽名才算份數）。已經簽過（含退回重簽）的算已扣，其他的之後刪除會退回 */
+async function upgradeSchema(env) {
+  try { await env.DB.prepare('ALTER TABLE docs ADD COLUMN charged INTEGER DEFAULT 0').run(); }
+  catch (e) { if (!/duplicate column/i.test(String(e && e.message))) throw e; return; }
+  await env.DB.prepare("UPDATE docs SET charged = CASE WHEN status IN ('signed', 'returned') OR signed_at IS NOT NULL THEN 1 ELSE 0 END").run();
+}
 const FILE_SCHEMA = [`CREATE TABLE IF NOT EXISTS files (key TEXT NOT NULL, part INTEGER NOT NULL, data BLOB, created_at INTEGER, PRIMARY KEY (key, part))`];
 function ensureSchema(env) {
   if (!schemaReady) {
-    const jobs = [env.DB.batch(SCHEMA.map(q => env.DB.prepare(q)))];
-    if (!env.FILES) jobs.push(fileDb(env).batch(FILE_SCHEMA.map(q => fileDb(env).prepare(q))));   // 沒有 R2：PDF 存在 D1 的 files 資料表
+    const jobs = [env.DB.batch(SCHEMA.map(q => env.DB.prepare(q))).then(() => upgradeSchema(env))];
+    jobs.push(fileDb(env).batch(FILE_SCHEMA.map(q => fileDb(env).prepare(q))));   // PDF 存在 D1 的 files 資料表（改用 R2 後，舊檔案搬完前也要讀得到）
     schemaReady = Promise.all(jobs).catch(e => { schemaReady = null; throw e; });
   }
   return schemaReady;

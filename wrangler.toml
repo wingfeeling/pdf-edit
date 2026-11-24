@@ -12,9 +12,9 @@ directory = "./web"
 binding = "ASSETS"
 run_worker_first = ["/api/*"]
 
-# 每天台灣時間凌晨 3:17 執行：刪除過期批次（cron 用 UTC）
+# 每小時第 47 分執行：刪除過期批次、把 D1 裡的舊檔案搬到 R2
 [triggers]
-crons = ["17 19 * * *"]
+crons = ["47 * * * *"]
 
 # 資料庫：先在 Cloudflare 主控台「儲存空間與資料庫 → D1」建立 pdf-editor-db，
 #         把它的「資料庫 ID」貼到下面（資料表會自動建立，不用另外執行 SQL）
@@ -23,11 +23,12 @@ binding = "DB"
 database_name = "pdf-editor-db"
 database_id = "de0a56fd-abff-47a5-8010-658d9a357b8e"
 
-# 檔案空間：PDF 直接存在上面的 D1 資料庫裡，不用 R2，所以不用綁信用卡。
-# （以後網站變大、願意綁卡用 R2 時，把下面四行最前面的 # 拿掉，並在 R2 建立 pdf-editor-files 貯體，就會自動改用 R2）
-# [[r2_buckets]]
-# binding = "FILES"
-# bucket_name = "pdf-editor-files"
+# 檔案空間：PDF 存在 R2 貯體 pdf-edit-db（Cloudflare 主控台 → R2 建立的，名稱要一模一樣）。
+# 以前存在 D1 的舊檔案照樣打得開，系統每小時會自動搬一批到 R2，不用手動處理。
+# R2 每月免費 10 GB；超過才收費（每 GB 每月約 US$0.015），下面的 R2_MAX_GB 是保險上限。
+[[r2_buckets]]
+binding = "FILES"
+bucket_name = "pdf-edit-db"
 
 [observability]
 enabled = true
@@ -51,18 +52,20 @@ OWNER_EMAILS = "wingfeeling@gmail.com"
 PLANS = '{"pro_m":{"name":"進階版 1 個月","price":49,"pro_days":31,"pay":"Credit"},"pro_y":{"name":"進階版 1 年","price":390,"pro_days":366},"sign300":{"name":"批次簽名 300 份","price":190,"credits":300,"credit_days":365,"pay":"Credit"},"sign1000":{"name":"批次簽名 1,000 份＋進階版 1 年","price":490,"credits":1000,"credit_days":365,"pro_days":366},"sign3000":{"name":"批次簽名 3,000 份＋進階版 1 年","price":990,"credits":3000,"credit_days":365,"pro_days":366}}'
 
 # ===== 免費試用 =====
-FREE_QUOTA = '{"ocr":10,"convert":10}'   # 每個月：掃描文字辨識、Word/Excel/PPT 轉檔各幾次（每月 1 日重算）
+FREE_QUOTA = '{"ocr":0,"convert":0}'     # 免費版每個月：掃描文字辨識、Word/Excel/PPT 轉檔各幾次。0 = 不限次數（這兩個都在使用者的瀏覽器裡處理，你不用花錢）
 FREE_BATCH_FILES = "10"          # 批次轉檔：免費版一次最多幾個檔案，超過要進階版
-FREE_DOC_CREDITS = "30"          # 每個帳號可以免費試用幾份批次簽名（一次性）
+FREE_DOC_CREDITS = "30"          # 每個帳號可以免費試用幾份批次簽名（一次性）。有簽名才算份數：上傳先預留，學生簽好才扣，沒簽就刪除或到期會退回
 FREE_MAX_BATCHES = "2"           # 試用時最多同時幾個批次
-FREE_RETAIN_DAYS = "14"          # 試用批次最多保存幾天（到期自動刪除）
-TRIAL_STORAGE_GUARD_GB = "8"     # （改用 R2 時才有用）全站檔案超過這個 GB 數時，暫停「試用」上傳（付費照常）；0 = 不限制
+FREE_RETAIN_DAYS = "7"           # 免費試用的批次最多保存幾天（到期自動刪除）
+TRIAL_STORAGE_GUARD_GB = "8"     #全站檔案超過這個 GB 數時，暫停「試用」上傳（付費照常）；0 = 不限制
 MAX_BATCH_DOCS = "3000"          # 一個批次最多幾份文件
 MAX_PDF_MB = "10"                # 每份 PDF 的大小上限
-MAX_RETAIN_DAYS = "180"          # 檔案最長保存天數
-D1_FILE_LIMIT_MB = "450"         # 檔案存在 D1 時的總上限（D1 免費版每個資料庫最大 500 MB，留一點給其他資料）。滿了就不能再上傳
-D1_TRIAL_GUARD_MB = "300"        # 檔案存在 D1 時，超過這個 MB 數就暫停「試用」上傳（付費照常）
-R2_FREE_GB = "10"                # （改用 R2 時才有用）
+MAX_RETAIN_DAYS = "180"          # 只買份數、沒有進階版時，檔案最長保存天數
+PRO_GRACE_DAYS = "30"            # 進階版：檔案不限保存天數。進階版到期後再保留幾天，沒續約才刪除
+R2_MAX_GB = "50"                 # 保險上限：R2 檔案總量到這裡就不能再上傳（50 GB 最多每月約 US$0.6）
+D1_FILE_LIMIT_MB = "450"         # （沒有 R2 時才有用）檔案存在 D1 時的總上限（D1 免費版每個資料庫最大 500 MB，留一點給其他資料）。滿了就不能再上傳
+D1_TRIAL_GUARD_MB = "300"        # （沒有 R2 時才有用）檔案存在 D1 時，超過這個 MB 數就暫停「試用」上傳（付費照常）
+R2_FREE_GB = "10"                # R2 每月免費的 GB 數（管理後台用來提醒你）
 
 # 綠界：MerchantID 可以寫這裡；HashKey / HashIV 是祕密，到主控台設定（見下方）
 ECPAY_MERCHANT_ID = "3002607"     # 這是綠界公開的測試商店代號，正式上線改成你自己的

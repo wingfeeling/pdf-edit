@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS batches (
   message TEXT,
   deadline INTEGER,              -- 簽名截止（毫秒）
   require_login INTEGER DEFAULT 1,
-  retain_until INTEGER,          -- 超過這個時間由排程自動刪除全部檔案
+  retain_until INTEGER,          -- 超過這個時間由排程自動刪除全部檔案；NULL = 不限天數（進階版，到期 PRO_GRACE_DAYS 天後刪除）
   created_at INTEGER,
   trial INTEGER DEFAULT 0,       -- 1 = 免費試用批次（保存天數較短）
   warned INTEGER DEFAULT 0       -- （保留欄位，目前沒用到）
@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS docs (
   signed_at INTEGER, signed_ip TEXT, signed_email TEXT,
   return_reason TEXT,
   created_at INTEGER,
-  credit TEXT                    -- 扣的是 trial 還是 paid 份數（還沒發出就刪除時退回）
+  credit TEXT,                   -- 預留的是 trial 還是 paid 份數
+  charged INTEGER DEFAULT 0      -- 1 = 學生簽過了，這份已算掉；0 = 還沒簽，刪除或到期時退回預留的份數
 );
 CREATE INDEX IF NOT EXISTS idx_docs_batch ON docs(batch_id);
 

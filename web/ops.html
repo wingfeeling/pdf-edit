@@ -98,7 +98,7 @@ async function loadDash() {
   warn.innerHTML = s.warnings.map(w => `<div class="notice warn">${esc(w)}</div>`).join('');
   const N = { ocr: '文字辨識', convert: 'Office 轉檔' };
   cards.innerHTML = `
-  <div class="card"><h3>檔案空間（${s.files.storage === 'r2' ? 'R2' : '存在 D1 資料庫'}）</h3><b>${gb(s.files.bytes)}</b> / ${gb(s.files.limit_bytes)}${meter(s.files.bytes, s.files.limit_bytes)}<div class="small muted">${s.files.docs} 份文件，${s.files.signed || 0} 份已簽，${s.batches.n} 個批次<br>其中免費試用占 ${gb(s.files.trial_bytes || 0)}；超過 ${gb(s.files.trial_guard_bytes)} 時暫停試用上傳</div></div>
+  <div class="card"><h3>檔案空間（${s.files.storage === 'r2' ? 'R2，分母是每月免費額度' : '存在 D1 資料庫'}）</h3><b>${gb(s.files.bytes)}</b> / ${gb(s.files.limit_bytes)}${meter(s.files.bytes, s.files.limit_bytes)}<div class="small muted">${s.files.docs} 份文件，${s.files.signed || 0} 份已簽，${s.batches.n} 個批次<br>其中免費試用占 ${gb(s.files.trial_bytes || 0)}；超過 ${gb(s.files.trial_guard_bytes)} 時暫停試用上傳</div></div>
   <div class="card"><h3>使用者</h3><b>${s.users.n || 0}</b> 位，進階版 ${s.users.paid || 0} 位，近 30 天活躍 ${s.users.active30 || 0} 位</div>
   <div class="card"><h3>本月付款</h3><b>${s.sales_this_month.n}</b> 筆，NT$ ${s.sales_this_month.amount}<div class="small muted">尚未用掉的已售份數：${(s.credits.open_credits || 0).toLocaleString()} 份（${s.credits.buyers || 0} 位客戶）</div></div>
   <div class="card"><h3>近 30 天功能使用</h3>${s.usage_30d.map(u => `${N[u.feature] || u.feature}：<b>${u.n}</b> 次`).join('<br>') || '<span class="muted">沒有紀錄</span>'}</div>

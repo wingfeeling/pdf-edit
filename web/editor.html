@@ -2470,7 +2470,7 @@ function openConvert() {
   <div class="chips" id="cvDir" style="margin-bottom:12px"><button data-v="from" class="${CV.dir === 'from' ? 'on' : ''}">PDF 轉成其他格式</button><button data-v="to" class="${CV.dir === 'to' ? 'on' : ''}">其他格式轉成 PDF</button></div>
   <div id="cvFrom" style="display:${CV.dir === 'from' ? '' : 'none'}">
     <div class="row" style="margin-bottom:8px"><span>要轉哪些檔案：</span><label><input type="radio" name="cvSrc" value="cur" ${has ? 'checked' : 'disabled'}> 目前開啟的文件</label><label><input type="radio" name="cvSrc" value="many" ${has ? '' : 'checked'}> <b>批次</b>：一次選很多個 PDF</label></div>
-    <div class="info" id="cvBatchInfo" style="margin-bottom:10px;display:none">批次轉檔：每個 PDF 各自轉好，最後打包成一個 ZIP 下載。免費版一次最多 <b>${BATCH_FREE}</b> 個檔案，超過要<a href="pricing.html" target="_blank">進階版</a>。轉 Word／Excel／PPT 時，每個檔案算一次免費次數。</div>
+    <div class="info" id="cvBatchInfo" style="margin-bottom:10px;display:none">批次轉檔：每個 PDF 各自轉好，最後打包成一個 ZIP 下載。免費版一次最多 <b>${BATCH_FREE}</b> 個檔案，超過要<a href="pricing.html" target="_blank">進階版</a>。</div>
     <div class="chips" id="cvFmt"><button data-v="jpg">JPG 圖片</button><button data-v="png">PNG 圖片</button><button data-v="docx">Word</button><button data-v="xlsx">Excel</button><button data-v="pptx">PowerPoint</button></div>
     <div id="cvOpts" style="margin-top:12px"></div>
     <div class="row" id="cvScopeRow" style="margin-top:8px"><label><input type="radio" name="cvScope" value="all" checked> 全部 ${S.pages.length} 頁</label><label><input type="radio" name="cvScope" value="chk" ${nChk ? '' : 'disabled'}> 只轉左側勾選的 ${nChk} 頁</label></div>
