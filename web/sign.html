@@ -60,7 +60,7 @@ async function start() {
   await App.ready;
   try { info = await App.api('/api/sign/' + encodeURIComponent(TOKEN)); }
   catch (e) {
-    if (e.status === 401) return show(`<div class="center card"><h3>請先登入</h3><p>這份文件只開放給本人查看。請用學校通知你的 Google 帳號 <b>${esc(e.data.hint || '')}</b> 登入。</p><button class="btn primary" id="lg">用 Google 登入</button></div>`), $('#lg').onclick = () => App.signIn().then(() => location.reload()).catch(er => toast(er.message));
+    if (e.status === 401) return show(`<div class="center card"><h3>請先登入</h3><p>這份文件只開放給本人查看。請用對方通知你的 Google 帳號 <b>${esc(e.data.hint || '')}</b> 登入。</p><button class="btn primary" id="lg">用 Google 登入</button></div>`), $('#lg').onclick = () => App.signIn().then(() => location.reload()).catch(er => toast(er.message));
     if (e.status === 403 && e.data.wrong_account) return show(`<div class="center card"><h3>登入的帳號不對</h3><p>你現在登入的是 <b>${esc(App.user && App.user.email)}</b>，但這份文件只開放給 <b>${esc(e.data.hint)}</b>。</p><button class="btn primary" id="sw">換一個帳號登入</button></div>`), $('#sw').onclick = async () => { await App.signOut(); };
     return show(`<div class="center card"><h3>無法開啟</h3><p class="muted">${esc(e.message)}</p></div>`);
   }
@@ -80,7 +80,7 @@ function setupDock() {
   }
   if (info.expired) { show(`<div class="banner"><div class="notice err">已經超過簽名期限（${App.fmtDate(info.batch.deadline)}），請聯絡承辦人員。</div></div>`); d.style.display = 'none'; return; }
   show(`<div class="banner">${info.status === 'returned' ? `<div class="notice err">承辦人員退回了你上次的簽名，請重新簽名。${info.return_reason ? '<br>原因：' + esc(info.return_reason) : ''}</div>` : ''}
-    <div class="notice info">${esc(info.student_name || '同學')} 你好：請先確認下面的文件內容，然後按「簽名」，在文件上要簽名的位置點一下。可以拖曳移動、拉右下角調整大小。確定後按「我簽好了，回傳」。${info.batch.deadline ? `<br>請在 <b>${App.fmtDate(info.batch.deadline)}</b> 前完成。` : ''}${info.batch.message ? `<div style="white-space:pre-wrap;margin-top:6px">${esc(info.batch.message)}</div>` : ''}</div></div>`);
+    <div class="notice info">${info.student_name ? esc(info.student_name) + ' ' : ''}你好：請先確認下面的文件內容，然後按「簽名」，在文件上要簽名的位置點一下。可以拖曳移動、拉右下角調整大小。確定後按「我簽好了，回傳」。${info.batch.deadline ? `<br>請在 <b>${App.fmtDate(info.batch.deadline)}</b> 前完成。` : ''}${info.batch.message ? `<div style="white-space:pre-wrap;margin-top:6px">${esc(info.batch.message)}</div>` : ''}</div></div>`);
   d.innerHTML = `<button class="btn" id="bSig">✍ 簽名</button><button class="btn primary" id="bDone" disabled>我簽好了，回傳</button>`;
   $('#bSig').onclick = openPad; $('#bDone').onclick = confirmSubmit;
 }
