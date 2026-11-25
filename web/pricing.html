@@ -66,7 +66,7 @@ App.api('/api/config').then(c => {
   const all = Object.entries(c.plans);
   const card = ([k, p]) => {
     const per = p.credits ? `<div class="per">每份約 ${(p.price / p.credits).toFixed(2)} 元・${p.credit_days || 365} 天內用完${p.pro_days ? '・含進階版' : ''}</div>` : `<div class="per">${p.pro_days >= 360 ? `平均每月約 ${Math.round(p.price / 12)} 元` : `${p.pro_days} 天`}</div>`;
-    const desc = p.credits ? `${p.credits.toLocaleString()} 份文件的線上簽名：上傳、產生簽名網址名單、學生簽名回傳、退回重簽、打包下載；有簽名才算份數。${p.pro_days ? '另含進階版 1 年：檔案不限保存天數、批次轉檔不限檔案數。' : `檔案最長保存 ${c.max_retain_days} 天。`}`
+    const desc = p.credits ? `${p.credits.toLocaleString()} 份文件的線上簽名：指定人員、多人依序簽同一份（算 1 份）、連署（每人算 1 份）、退回重簽、打包下載；有簽名才算份數。${p.pro_days ? '另含進階版 1 年：檔案不限保存天數、批次轉檔不限檔案數。' : `檔案最長保存 ${c.max_retain_days} 天。`}`
       : `批次轉檔一次不限檔案數（免費版一次 ${c.free_batch_files || 10} 個）；批次簽名的檔案不限保存天數（免費試用 ${c.free_retain_days} 天、只買份數 ${c.max_retain_days} 天）。`;
     const best = k === 'sign1000' ? '<span class="tag">學校最常選</span><br>' : '';
     return `<div class="card">${best}<h3 style="margin:0 0 4px">${esc(p.name)}</h3><div class="price">${money(p.price)}</div>${per}<p class="small muted">${desc}</p>

@@ -48,40 +48,92 @@ const $ = s => document.querySelector(s), esc = App.esc;
 const pdfjsLib = window['pdfjs-dist/build/pdf'];
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 const PJ = { cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/', cMapPacked: true, standardFontDataUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/standard_fonts/' };
-const TOKEN = new URLSearchParams(location.search).get('t') || '';
-let info = null, bytes = null, pdf = null, pages = [], sigs = [], sigImg = null, placing = false;
+const Q = new URLSearchParams(location.search);
+const TOKEN = Q.get('t') || '', LINK = Q.get('b') || '';
+let info = null, bytes = null, pdf = null, pages = [], sigs = [], sigImg = null, placing = false, openInfo = null;
 let tT; function toast(m, ms = 4000) { const t = $('#toast'); t.textContent = m; t.classList.add('on'); clearTimeout(tT); tT = setTimeout(() => t.classList.remove('on'), ms); }
 const busy = m => { $('#busy').classList.toggle('on', !!m); if (m) $('#busyMsg').textContent = m; };
 function modal(h) { $('#mbox').innerHTML = h; $('#modal').classList.add('on'); }
 function closeModal() { $('#modal').classList.remove('on'); }
 const show = h => { $('#msg').innerHTML = h; };
+const go = t => location.replace('sign.html?t=' + encodeURIComponent(t));
+function needLogin(hint) {
+  show(`<div class="center card"><h3>請先用 Google 帳號登入</h3><p>${hint ? `這份文件只開放給 <b>${esc(hint)}</b>，請用對方通知你的那個 Google 帳號登入。` : '請用對方通知你的 Google 帳號登入。'}</p><p class="small muted">第一次使用的話，登入就會自動建立帳號，不用另外註冊。</p><button class="btn primary" id="lg">用 Google 登入</button></div>`);
+  $('#lg').onclick = () => App.signIn().then(u => u && location.reload()).catch(er => er.message !== '已取消登入' && toast(er.message));
+}
+function wrongAccount(hint) {
+  show(`<div class="center card"><h3>登入的帳號不對</h3><p>你現在登入的是 <b>${esc(App.user && App.user.email)}</b>${hint ? `，但這份文件只開放給 <b>${esc(hint)}</b>` : ''}。</p><button class="btn primary" id="sw">換一個帳號登入</button></div>`);
+  $('#sw').onclick = async () => { await App.signOut(); };
+}
+function fail(e) {
+  if (e.status === 401) return needLogin(e.data && e.data.hint);
+  if (e.status === 403 && e.data && e.data.wrong_account) return wrongAccount(e.data.hint);
+  show(`<div class="center card"><h3>無法開啟</h3><p class="muted">${esc(e.message)}</p></div>`);
+}
+function head(b) { $('#org').textContent = b.org || ''; $('#ttl').textContent = b.name || '線上簽名'; document.title = b.name || '線上簽名'; }
+async function loadPdf(path) {
+  busy('文件載入中…');
+  try { const r = await App.api(path, { raw: true }); bytes = new Uint8Array(await r.arrayBuffer()); pdf = await pdfjsLib.getDocument({ data: bytes.slice(), ...PJ }).promise; }
+  catch (e) { busy(false); show(`<div class="center card"><h3>文件載入失敗</h3><p class="muted">${esc(e.message)}</p></div>`); return false; }
+  await render(); busy(false); return true;
+}
 
 async function start() {
-  if (!TOKEN) return show('<div class="center card"><h3>網址不完整</h3><p class="muted">請直接點信裡的按鈕，或把信裡的完整網址貼到瀏覽器。</p></div>');
+  if (!TOKEN && !LINK) return show('<div class="center card"><h3>網址不完整</h3><p class="muted">請把對方給你的完整網址貼到瀏覽器。</p></div>');
   await App.ready;
-  try { info = await App.api('/api/sign/' + encodeURIComponent(TOKEN)); }
-  catch (e) {
-    if (e.status === 401) return show(`<div class="center card"><h3>請先登入</h3><p>這份文件只開放給本人查看。請用對方通知你的 Google 帳號 <b>${esc(e.data.hint || '')}</b> 登入。</p><button class="btn primary" id="lg">用 Google 登入</button></div>`), $('#lg').onclick = () => App.signIn().then(() => location.reload()).catch(er => toast(er.message));
-    if (e.status === 403 && e.data.wrong_account) return show(`<div class="center card"><h3>登入的帳號不對</h3><p>你現在登入的是 <b>${esc(App.user && App.user.email)}</b>，但這份文件只開放給 <b>${esc(e.data.hint)}</b>。</p><button class="btn primary" id="sw">換一個帳號登入</button></div>`), $('#sw').onclick = async () => { await App.signOut(); };
-    return show(`<div class="center card"><h3>無法開啟</h3><p class="muted">${esc(e.message)}</p></div>`);
+  if (LINK) return join();
+  try { info = await App.api('/api/sign/' + encodeURIComponent(TOKEN)); } catch (e) { return fail(e); }
+  head(info.batch);
+  if (await loadPdf(`/api/sign/${encodeURIComponent(TOKEN)}/file`)) setupDock();
+}
+/* ---------- 共用網址：登入後帶到自己要簽的那份 ---------- */
+async function join() {
+  if (!App.user) return needLogin();
+  let j; try { j = await App.api('/api/join/' + encodeURIComponent(LINK)); } catch (e) { return fail(e); }
+  head(j.batch);
+  if (j.batch.mode === 'open') return joinOpen(j);
+  if (j.docs.length === 1) return go(j.docs[0].token);
+  if (!j.docs.length) {
+    show(`<div class="center card"><h3>名單上沒有你的帳號</h3><p>你現在登入的是 <b>${esc(j.email)}</b>，但「${esc(j.batch.name)}」的簽名名單上沒有這個 Email。</p><p class="small muted">如果你有別的 Google 帳號，請換那個帳號登入；不確定的話，請問發給你網址的人是用哪個 Email 登記的。</p><button class="btn primary" id="sw">換一個帳號登入</button></div>`);
+    $('#sw').onclick = async () => { await App.signOut(); }; return;
   }
-  $('#org').textContent = info.batch.org || ''; $('#ttl').textContent = info.batch.name || '線上簽名'; document.title = (info.batch.name || '線上簽名');
-  busy('文件載入中…');
-  try { const r = await App.api(`/api/sign/${encodeURIComponent(TOKEN)}/file`, { raw: true }); bytes = new Uint8Array(await r.arrayBuffer()); pdf = await pdfjsLib.getDocument({ data: bytes.slice(), ...PJ }).promise; }
-  catch (e) { busy(false); return show(`<div class="center card"><h3>文件載入失敗</h3><p class="muted">${esc(e.message)}</p></div>`); }
-  await render(); busy(false); setupDock();
+  const st = d => d.done ? '<span class="pill st-signed">全部簽好了</span>' : d.my_turn ? '<span class="pill st-sent">輪到你簽</span>' : d.my_done ? '<span class="pill">你已簽好，等其他人</span>' : `<span class="pill">等「${esc(d.waiting)}」先簽</span>`;
+  show(`<div class="center card" style="max-width:640px"><h3>你有 ${j.docs.length} 份文件</h3><p class="small muted">${esc(j.email)}・點一下文件就可以打開</p>
+    ${j.docs.map(d => `<a class="row" href="sign.html?t=${encodeURIComponent(d.token)}" style="justify-content:space-between;padding:12px;border:1px solid var(--line);border-radius:10px;margin-top:8px;text-decoration:none;color:inherit"><span style="word-break:break-all">${esc(d.filename)}${d.total > 1 ? `<span class="small muted">（${d.cur}／${d.total} 人已簽）</span>` : ''}</span>${st(d)}</a>`).join('')}</div>`);
+}
+async function joinOpen(j) {
+  if (j.mine) return go(j.mine.token);
+  if (!j.has_file) return show('<div class="center card"><h3>還不能簽</h3><p class="muted">發起人還沒放上要簽的文件，請晚一點再打開這個網址。</p></div>');
+  if (j.expired) return show(`<div class="center card"><h3>已經截止</h3><p class="muted">這份連署已經在 ${App.fmtDate(j.batch.deadline)} 截止了。</p></div>`);
+  if (j.full) return show(`<div class="center card"><h3>名額已滿</h3><p class="muted">這份連署最多 ${j.max} 人，已經額滿了。</p></div>`);
+  openInfo = j;
+  info = { filename: j.filename, batch: j.batch, my_turn: true, signers: [], student_name: j.name };
+  if (await loadPdf(`/api/join/${encodeURIComponent(LINK)}/file`)) setupDock();
+}
+function progress() {
+  const s = info.signers || []; if (s.length < 2) return '';
+  const n = '①②③④⑤';
+  return `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${s.map((x, i) => `<span class="pill ${x.done ? 'st-signed' : i === info.cur ? 'st-sent' : ''}">${n[i] || i + 1} ${x.me ? '你' : esc(x.name)}${x.done ? ' ✔ 已簽' : i === info.cur ? '（現在輪到' + (x.me ? '你' : '這位') + '）' : ''}</span>`).join('')}</div>`;
 }
 function setupDock() {
   const d = $('#dock'); d.style.display = 'flex';
-  if (info.status === 'signed') {
-    show(`<div class="banner"><div class="notice ok">✔ 你已經在 ${App.fmtDate(info.signed_at, 1)} 完成簽名並回傳，文件已鎖定，不能再修改。下面是你簽好的文件。</div></div>`);
-    d.innerHTML = `<button class="btn" id="dl">下載簽好的文件</button>`;
-    $('#dl').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })); a.download = info.filename.replace(/(\.pdf)?$/i, '(已簽).pdf'); a.click(); };
-    return;
+  const many = (info.signers || []).length > 1;
+  const dl = (label, suffix) => { d.innerHTML = `<button class="btn" id="dl">${label}</button>`; $('#dl').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })); a.download = info.filename.replace(/(\.pdf)?$/i, suffix + '.pdf'); a.click(); }; };
+  if (info.done) {
+    show(`<div class="banner"><div class="notice ok">✔ ${many ? `${info.signers.length} 位都簽好了，文件已鎖定。` : `你已經在 ${App.fmtDate(info.my_signed_at || info.signed_at, 1)} 完成簽名並回傳，文件已鎖定，不能再修改。`}下面是簽好的文件。${progress()}</div></div>`);
+    return dl('下載簽好的文件', '(已簽)');
   }
-  if (info.expired) { show(`<div class="banner"><div class="notice err">已經超過簽名期限（${App.fmtDate(info.batch.deadline)}），請聯絡承辦人員。</div></div>`); d.style.display = 'none'; return; }
-  show(`<div class="banner">${info.status === 'returned' ? `<div class="notice err">承辦人員退回了你上次的簽名，請重新簽名。${info.return_reason ? '<br>原因：' + esc(info.return_reason) : ''}</div>` : ''}
-    <div class="notice info">${info.student_name ? esc(info.student_name) + ' ' : ''}你好：請先確認下面的文件內容，然後按「簽名」，在文件上要簽名的位置點一下。可以拖曳移動、拉右下角調整大小。確定後按「我簽好了，回傳」。${info.batch.deadline ? `<br>請在 <b>${App.fmtDate(info.batch.deadline)}</b> 前完成。` : ''}${info.batch.message ? `<div style="white-space:pre-wrap;margin-top:6px">${esc(info.batch.message)}</div>` : ''}</div></div>`);
+  if (!info.my_turn) {
+    const w = info.signers[info.cur];
+    show(`<div class="banner"><div class="notice info">${info.my_signed_at ? `✔ 你已經在 ${App.fmtDate(info.my_signed_at, 1)} 簽好了，現在等「${esc(w.name)}」接著簽。下面是目前的文件。` : `還沒輪到你：要等「${esc(w.name)}」先簽，簽好之後再打開這個網址就可以簽了。下面是目前的文件，可以先看內容。`}${progress()}</div></div>`);
+    if (info.my_signed_at) return dl('下載目前的文件', '(簽名中)');
+    d.style.display = 'none'; return;
+  }
+  if (info.expired) { show(`<div class="banner"><div class="notice err">已經超過簽名期限（${App.fmtDate(info.batch.deadline)}），請聯絡發起人。</div></div>`); d.style.display = 'none'; return; }
+  const who = info.student_name ? esc(info.student_name) + ' ' : '';
+  const intro = openInfo ? `這是一份連署，目前已經有 <b>${openInfo.count}</b> 人簽了${openInfo.max ? `（最多 ${openInfo.max} 人）` : ''}。` : many && info.cur > 0 ? '前面的人已經簽好了，你會看到他們的簽名。' : '';
+  show(`<div class="banner">${info.status === 'returned' ? `<div class="notice err">發起人退回了這份文件，請重新簽名。${info.return_reason ? '<br>原因：' + esc(info.return_reason) : ''}</div>` : ''}
+    <div class="notice info">${who}你好：${intro}請先確認下面的文件內容，然後按「簽名」，在文件上要簽名的位置點一下。可以拖曳移動、拉右下角調整大小。確定後按「我簽好了，回傳」。${info.batch.deadline ? `<br>請在 <b>${App.fmtDate(info.batch.deadline)}</b> 前完成。` : ''}${info.batch.message ? `<div style="white-space:pre-wrap;margin-top:6px">${esc(info.batch.message)}</div>` : ''}${progress()}</div></div>`);
   d.innerHTML = `<button class="btn" id="bSig">✍ 簽名</button><button class="btn primary" id="bDone" disabled>我簽好了，回傳</button>`;
   $('#bSig').onclick = openPad; $('#bDone').onclick = confirmSubmit;
 }
@@ -149,7 +201,8 @@ let rT; window.addEventListener('resize', () => { clearTimeout(rT); rT = setTime
 /* ---------- 回傳 ---------- */
 function confirmSubmit() {
   if (!sigs.length) return toast('請先簽名');
-  modal(`<h3>確定要回傳嗎？</h3><p>按下「確定回傳」後，簽名就會鎖定，<b>之後不能再修改</b>。如果有錯，要請承辦人員退回才能重簽。</p>
+  const next = info.signers && info.signers[info.cur + 1];
+  modal(`<h3>確定要回傳嗎？</h3><p>按下「確定回傳」後，簽名就會鎖定，<b>之後不能再修改</b>。如果有錯，要請發起人退回才能重簽。${next ? `<br>回傳後就換「${esc(next.name)}」接著簽。` : ''}</p>
   <div class="row" style="justify-content:flex-end"><button class="btn" onclick="closeModal()">再檢查一下</button><button class="btn primary" id="cGo">確定回傳</button></div>`);
   $('#cGo').onclick = submit;
 }
@@ -165,9 +218,9 @@ async function submit() {
       page.drawImage(png, { x: p[0], y: p[1], width: s.w, height: s.h, rotate: degrees(P.pp.rotate) });
     }
     const out = await doc.save();
-    await App.api(`/api/sign/${encodeURIComponent(TOKEN)}/submit`, { body: new Blob([out], { type: 'application/pdf' }), headers: { 'Content-Type': 'application/pdf' } });
-    busy(false); sigs = []; location.reload();
-  } catch (e) { busy(false); toast('回傳失敗：' + e.message, 8000); if (e.status === 409) setTimeout(() => location.reload(), 1500); }
+    const r = await App.api(LINK ? `/api/join/${encodeURIComponent(LINK)}/submit` : `/api/sign/${encodeURIComponent(TOKEN)}/submit`, { body: new Blob([out], { type: 'application/pdf' }), headers: { 'Content-Type': 'application/pdf' } });
+    busy(false); sigs = []; if (LINK && r.token) return go(r.token); location.reload();
+  } catch (e) { busy(false); toast('回傳失敗：' + e.message, 8000); if (e.status === 409) setTimeout(() => (e.data && e.data.token ? go(e.data.token) : location.reload()), 1500); }
 }
 start();
 </script>

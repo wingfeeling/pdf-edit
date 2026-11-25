@@ -31,8 +31,13 @@ CREATE TABLE IF NOT EXISTS batches (
   retain_until INTEGER,          -- 超過這個時間由排程自動刪除全部檔案；NULL = 不限天數（進階版，到期 PRO_GRACE_DAYS 天後刪除）
   created_at INTEGER,
   trial INTEGER DEFAULT 0,       -- 1 = 免費試用批次（保存天數較短）
-  warned INTEGER DEFAULT 0       -- （保留欄位，目前沒用到）
+  warned INTEGER DEFAULT 0,      -- （保留欄位，目前沒用到）
+  mode TEXT DEFAULT 'list',      -- list 指定人員 / multi 多人簽同一份（最多 5 人依序簽）/ open 連署
+  link TEXT,                     -- 共用簽名網址 sign.html?b=… 裡的亂碼
+  tpl_key TEXT, tpl_name TEXT, tpl_size INTEGER,  -- 連署：大家要簽的那一份文件
+  max_signers INTEGER            -- 連署人數上限（NULL = 不限）
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_link ON batches(link);
 CREATE INDEX IF NOT EXISTS idx_batches_owner ON batches(owner_uid);
 CREATE INDEX IF NOT EXISTS idx_batches_retain ON batches(retain_until);
 
@@ -53,8 +58,11 @@ CREATE TABLE IF NOT EXISTS docs (
   return_reason TEXT,
   created_at INTEGER,
   credit TEXT,                   -- 預留的是 trial 還是 paid 份數
-  charged INTEGER DEFAULT 0      -- 1 = 學生簽過了，這份已算掉；0 = 還沒簽，刪除或到期時退回預留的份數
+  charged INTEGER DEFAULT 0,     -- 1 = 有人簽過了，這份已算掉；0 = 還沒簽，刪除或到期時退回預留的份數
+  signers TEXT,                  -- 簽名人 JSON：[{email, name, at, ip, key, size}]，依簽名順序；key = 這個人簽好後的版本
+  cur INTEGER DEFAULT 0          -- 已經簽了幾個人（status：pending/sent 沒人簽、partial 簽名中、signed 全部簽好、returned 退回）
 );
+CREATE INDEX IF NOT EXISTS idx_docs_batch_email ON docs(batch_id, email);
 CREATE INDEX IF NOT EXISTS idx_docs_batch ON docs(batch_id);
 
 

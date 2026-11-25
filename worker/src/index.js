@@ -208,12 +208,62 @@ function grantStmts(env, uid, { pro_days, credits, credit_days }, reason, ref) {
   s.push(env.DB.prepare('INSERT INTO credit_log (uid, credits, pro_days, reason, ref, created_at) VALUES (?,?,?,?,?,?)').bind(uid, credits || 0, pro_days || 0, reason, ref || '', t));
   return s;
 }
-async function storedBytes(env) { const r = await env.DB.prepare('SELECT COALESCE(SUM(orig_size),0) + COALESCE(SUM(signed_size),0) AS bytes FROM docs').first(); return r.bytes || 0; }
+async function storedBytes(env) {
+  const r = await env.DB.prepare('SELECT COALESCE(SUM(orig_size),0) + COALESCE(SUM(signed_size),0) AS bytes FROM docs').first();
+  const t = await env.DB.prepare('SELECT COALESCE(SUM(tpl_size),0) AS bytes FROM batches').first();
+  return (r.bytes || 0) + (t.bytes || 0);
+}
+/* 上傳前檢查網站的檔案空間 */
+async function storageCheck(env, b, len) {
+  const lim = storageLimits(env);
+  if (lim.hard > 0 && (await storedBytes(env)) + len > lim.hard)   // 檔案存在 D1 時，滿了就不能再上傳，免得整個資料庫寫不進去
+    throw new HttpError(503, '網站的檔案空間已滿，請先刪除已經不用的批次，或聯絡網站管理者', { storage_full: true });
+  if (b.trial && lim.guard > 0 && (await storedBytes(env)) + len > lim.guard)   // 免費試用的總空間到警戒線時，先停止試用上傳；付費的照常
+    throw new HttpError(503, '網站的免費試用空間暫時額滿，請過幾天再試，或購買簽名份數後馬上就能上傳', { need_pay: true, storage_full: true });
+}
 
 /* ============================== 簽名網址 ============================== */
 // SITE_URL 沒填時，用目前網站的網址（Worker 同時提供網頁和後端，所以一定對）
 const siteBase = (env, req) => (env.SITE_URL || (req ? new URL(req.url).origin : '')).replace(/\/$/, '');
 function signUrl(env, token, req) { return `${siteBase(env, req)}/sign.html?t=${token}`; }
+function joinUrl(env, link, req) { return `${siteBase(env, req)}/sign.html?b=${link}`; }
+
+/* ============================== 簽名方式與簽名人 ==============================
+ * 批次有三種簽名方式（batches.mode）：
+ *  list  指定人員：每份文件 1 個人簽（名單上的 Email）
+ *  multi 多人簽同一份：每份文件最多 MAX_SIGNERS 個人，照順序輪流簽，後面的人看得到前面的人簽好的樣子
+ *  open  連署：不限定人員，拿到網址的人用 Google 登入就能簽，每簽一個人就多一份（份數 = 簽名人數）
+ * 三種方式都用同一個共用網址（sign.html?b=batches.link）：打開後先用 Google 登入（第一次登入就等於註冊），
+ * 系統再依登入的 Email 帶到他要簽的那份。舊的每人專屬網址（sign.html?t=docs.token）也還能用。
+ * docs.signers = [{ email, name, at, ip, key, size }]（JSON，依簽名順序）；docs.cur = 已經簽了幾個人。
+ * 每個人簽好都另存一個版本（key），退回時可以退到某個人，從他開始重簽。舊資料沒有 signers 時用 email 欄當唯一的簽名人。 */
+const MAX_SIGNERS = 5;
+const MODES = ['list', 'multi', 'open'];
+const modeOf = b => MODES.includes(b && b.mode) ? b.mode : 'list';
+function signersOf(d) {
+  if (d.signers) { try { const a = JSON.parse(d.signers); if (Array.isArray(a) && a.length) return a; } catch (e) { } }
+  const done = d.status === 'signed';
+  return [{ email: normEmail(d.email), name: d.student_name || '', at: done ? d.signed_at : null, ip: done ? d.signed_ip : null, key: done ? d.signed_key : null, size: done ? d.signed_size : null }];
+}
+const curOf = (d, s) => d.signers ? Math.min(s.length, d.cur || 0) : (d.status === 'signed' ? 1 : 0);
+// 第 c 個人要簽的版本：前一個人簽好的檔案；都還沒人簽就是原檔（連署用批次的共用文件）
+function keyBefore(d, s, c, tplKey) { for (let i = c - 1; i >= 0; i--) if (s[i] && s[i].key) return s[i].key; return d.orig_key || tplKey || null; }
+const sizeOf = s => s.reduce((n, x) => n + (x.key ? (x.size || 0) : 0), 0);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function cleanSigners(arr, max, taken = []) {
+  const out = [], seen = new Set(taken.map(normEmail).filter(Boolean));
+  for (const x of (Array.isArray(arr) ? arr : [])) {
+    const email = normEmail(x && x.email).slice(0, 200), name = String((x && x.name) || '').trim().slice(0, 60);
+    if (!email && !name) continue;
+    if (email && !EMAIL_RE.test(email)) throw new HttpError(400, `Email 格式不對：${email}`);
+    if (email && seen.has(email)) throw new HttpError(400, `同一份文件裡，${email} 出現了兩次`);
+    if (email) seen.add(email);
+    out.push({ email, name });
+  }
+  if (out.length > max) throw new HttpError(400, max === 1 ? '「指定人員」每份文件只能有 1 個簽名人；要多人簽同一份，請建立「多人簽同一份」的批次' : `一份文件最多 ${max} 個人簽名`);
+  return out;
+}
+const maxSigners = b => modeOf(b) === 'multi' ? MAX_SIGNERS : 1;
 
 /* ============================== 批次簽名 ============================== */
 async function ownBatch(env, u, id) {
@@ -226,8 +276,17 @@ async function ownDoc(env, u, id) {
   if (!d || d.owner_uid !== u.uid) throw new HttpError(404, '找不到這份文件');
   return d;
 }
-const docOut = (env, d, req) => ({ id: d.id, filename: d.filename, student_id: d.student_id, student_name: d.student_name, email: d.email, status: d.status,
-  sign_url: signUrl(env, d.token, req), sent_at: d.sent_at, sent_count: d.sent_count, signed_at: d.signed_at, signed_email: d.signed_email, return_reason: d.return_reason, orig_size: d.orig_size, signed_size: d.signed_size });
+const docOut = (env, d, req) => { const s = signersOf(d), c = curOf(d, s); return { id: d.id, filename: d.filename, student_id: d.student_id, student_name: d.student_name, email: d.email, status: d.status,
+  sign_url: signUrl(env, d.token, req), sent_at: d.sent_at, sent_count: d.sent_count, signed_at: d.signed_at, signed_email: d.signed_email, return_reason: d.return_reason, orig_size: d.orig_size, signed_size: d.signed_size,
+  signers: s.map(x => ({ email: x.email || '', name: x.name || '', at: x.key ? x.at : null })), cur: c, created_at: d.created_at }; };
+// 舊批次沒有共用網址，第一次打開時補上
+async function ensureLink(env, b) {
+  if (b.link) return b.link;
+  const link = randId(16);
+  await env.DB.prepare('UPDATE batches SET link = ? WHERE id = ? AND link IS NULL').bind(link, b.id).run();
+  return (b.link = (await env.DB.prepare('SELECT link FROM batches WHERE id = ?').bind(b.id).first()).link);
+}
+const docKeys = d => [d.orig_key, d.signed_key, ...signersOf(d).map(x => x.key)];
 async function readPdf(req, env) {
   const max = intVar(env, 'MAX_PDF_MB', 20) * 1048576;
   const len = +req.headers.get('Content-Length') || 0; if (len > max) throw new HttpError(413, `檔案太大，上限 ${env.MAX_PDF_MB || 20} MB`);
@@ -296,8 +355,8 @@ async function migrateToR2(env, maxKeys = 40) {
   return moved;
 }
 async function deleteBatch(env, b) {
-  const { results } = await env.DB.prepare('SELECT orig_key, signed_key, credit, charged FROM docs WHERE batch_id = ?').bind(b.id).all();
-  await deleteKeys(env, results.flatMap(r => [r.orig_key, r.signed_key]));
+  const { results } = await env.DB.prepare('SELECT orig_key, signed_key, signers, email, student_name, status, signed_at, signed_ip, signed_size, credit, charged FROM docs WHERE batch_id = ?').bind(b.id).all();
+  await deleteKeys(env, [...new Set([b.tpl_key, ...results.flatMap(docKeys)])]);
   const back = { trial: 0, paid: 0 }; for (const d of results) if (refundable(d) && d.credit in back) back[d.credit]++;
   const st = [env.DB.prepare('DELETE FROM docs WHERE batch_id = ?').bind(b.id), env.DB.prepare('DELETE FROM batches WHERE id = ?').bind(b.id)];
   if (back.trial) st.push(env.DB.prepare('UPDATE users SET trial_docs = MAX(0, COALESCE(trial_docs, 0) - ?) WHERE uid = ?').bind(back.trial, b.owner_uid));
@@ -315,14 +374,18 @@ function fileResponse(obj, name, req, env, inline = true) {
 /* 學生端：用簽名網址裡的 token 找文件，必要時要求本人 Google 登入 */
 async function signDoc(req, env, token) {
   if (!/^[A-Za-z0-9_-]{20,64}$/.test(token)) throw new HttpError(404, '簽名網址不正確');
-  const d = await env.DB.prepare('SELECT d.*, b.name AS batch_name, b.org_name, b.message, b.deadline, b.require_login, b.retain_until FROM docs d JOIN batches b ON b.id = d.batch_id WHERE d.token = ?').bind(token).first();
+  const d = await env.DB.prepare('SELECT d.*, b.name AS batch_name, b.org_name, b.message, b.deadline, b.require_login, b.retain_until, b.mode, b.tpl_key, b.link, b.owner_uid AS b_owner FROM docs d JOIN batches b ON b.id = d.batch_id WHERE d.token = ?').bind(token).first();
   if (!d) throw new HttpError(404, '找不到這份文件，可能已被刪除或網址不完整');
-  if (d.require_login) {
+  const s = signersOf(d), c = curOf(d, s);
+  d._s = s; d._cur = c;
+  if (d.require_login || d.signers) {
+    const hint = s.map(x => maskEmail(x.email)).filter(Boolean).join('、');
     const u = await authUser(req, env, false);
-    if (!u) throw new HttpError(401, '請用學校通知你的 Google 帳號登入', { need_login: true, hint: maskEmail(d.email) });
-    if (u.email !== normEmail(d.email) || !u.email_verified) throw new HttpError(403, `這份文件只開放給 ${maskEmail(d.email)} 開啟，請改用那個帳號登入`, { wrong_account: true, hint: maskEmail(d.email) });
-    d._viewer = u.email;
-  }
+    if (!u) throw new HttpError(401, '請用對方通知你的 Google 帳號登入', { need_login: true, hint });
+    const me = u.email_verified ? s.findIndex(x => x.email && x.email === u.email) : -1;
+    if (me < 0) throw new HttpError(403, `這份文件只開放給 ${hint || '指定的人'} 開啟，請改用那個帳號登入`, { wrong_account: true, hint });
+    d._viewer = u.email; d._me = me;
+  } else d._me = Math.min(c, s.length - 1);   // 舊批次「持有網址就能簽」：誰打開都算輪到的那個人
   return d;
 }
 
@@ -363,28 +426,87 @@ async function route(req, env, ctx) {
 
   /* ---------- 學生簽名（公開網址＋token） ---------- */
   if ((m = p.match(/^\/api\/sign\/([^/]+)$/)) && M === 'GET') {
-    const d = await signDoc(req, env, m[1]);
+    const d = await signDoc(req, env, m[1]); const s = d._s, c = d._cur, me = d._me;
     return J({ filename: d.filename, status: d.status, signed_at: d.signed_at, return_reason: d.status === 'returned' ? d.return_reason : null,
-      student_name: d.student_name, batch: { name: d.batch_name, org: d.org_name, message: d.message, deadline: d.deadline }, expired: !!(d.deadline && now() > d.deadline + DAY) });
+      student_name: (s[me] && s[me].name) || d.student_name, mode: modeOf(d),
+      batch: { name: d.batch_name, org: d.org_name, message: d.message, deadline: d.deadline }, expired: !!(d.deadline && now() > d.deadline + DAY),
+      signers: s.map((x, i) => ({ name: x.name || maskEmail(x.email) || `第 ${i + 1} 位`, done: i < c, at: i < c ? x.at : null, me: i === me })),
+      cur: c, me, my_turn: me === c && c < s.length, done: c >= s.length, my_signed_at: me < c ? s[me].at : null });
   }
   if ((m = p.match(/^\/api\/sign\/([^/]+)\/file$/)) && M === 'GET') {
     const d = await signDoc(req, env, m[1]);
-    const key = d.status === 'signed' ? d.signed_key : d.orig_key;
-    const obj = await fileGet(env, key); if (!obj) throw new HttpError(404, '檔案不存在');
-    return fileResponse(obj, d.status === 'signed' ? signedName(d.filename) : d.filename, req, env);
+    const key = keyBefore(d, d._s, d._cur, d.tpl_key);   // 目前最新的版本（前面的人簽好的樣子）
+    const obj = key && await fileGet(env, key); if (!obj) throw new HttpError(404, '檔案不存在');
+    return fileResponse(obj, d._cur >= d._s.length ? signedName(d.filename) : d.filename, req, env);
   }
   if ((m = p.match(/^\/api\/sign\/([^/]+)\/submit$/)) && M === 'POST') {
-    const d = await signDoc(req, env, m[1]);
-    if (d.status === 'signed') throw new HttpError(409, '這份文件已經簽好了，不能再修改');
+    const d = await signDoc(req, env, m[1]); const s = d._s, c = d._cur;
+    if (c >= s.length) throw new HttpError(409, '這份文件已經簽好了，不能再修改');
+    if (d._me < c) throw new HttpError(409, '你已經簽過了，不能再修改');
+    if (d._me > c) throw new HttpError(409, `還沒輪到你，要等「${s[c].name || maskEmail(s[c].email)}」先簽`);
     if (d.deadline && now() > d.deadline + DAY) throw new HttpError(403, '已經超過簽名期限，請聯絡承辦人員');
     const buf = await readPdf(req, env);
-    const key = `b/${d.batch_id}/${d.id}/signed-${randId(6)}.pdf`;
+    const key = `b/${d.batch_id}/${d.id}/s${c + 1}-${randId(6)}.pdf`;
     await filePut(env, key, buf);
-    const ip = req.headers.get('CF-Connecting-IP') || '';
-    const r = await env.DB.prepare("UPDATE docs SET status = 'signed', charged = 1, signed_key = ?, signed_size = ?, signed_at = ?, signed_ip = ?, signed_email = ? WHERE id = ? AND status != 'signed'")
-      .bind(key, buf.byteLength, now(), ip, d._viewer || '', d.id).run();
-    if (!r.meta.changes) { await deleteKeys(env, [key]); throw new HttpError(409, '這份文件已經簽好了，不能再修改'); }
-    return J({ ok: true, signed_at: now() });
+    const ip = req.headers.get('CF-Connecting-IP') || '', t = now();
+    s[c] = { ...s[c], at: t, ip, key, size: buf.byteLength, by: d._viewer || '' };
+    const done = c + 1 >= s.length;
+    const r = await env.DB.prepare("UPDATE docs SET signers = ?, cur = ?, status = ?, charged = 1, signed_key = ?, signed_size = ?, signed_at = ?, signed_ip = ?, signed_email = ?, return_reason = CASE WHEN ? THEN NULL ELSE return_reason END WHERE id = ? AND COALESCE(cur, 0) = ? AND status != 'signed'")
+      .bind(JSON.stringify(s), c + 1, done ? 'signed' : 'partial', key, sizeOf(s), t, ip, d._viewer || '', done ? 1 : 0, d.id, d.signers ? c : 0).run();
+    if (!r.meta.changes) { await deleteKeys(env, [key]); throw new HttpError(409, '這份文件剛剛有人簽了，請重新整理頁面再看一次'); }
+    return J({ ok: true, signed_at: t, done });
+  }
+
+  /* ---------- 共用簽名網址（sign.html?b=…）：先登入，再帶到自己要簽的那份；連署直接簽 ---------- */
+  if ((m = p.match(/^\/api\/join\/([^/]+)(\/file|\/submit)?$/))) {
+    if (!/^[A-Za-z0-9_-]{12,64}$/.test(m[1])) throw new HttpError(404, '簽名網址不正確');
+    const b = await env.DB.prepare('SELECT * FROM batches WHERE link = ?').bind(m[1]).first();
+    if (!b) throw new HttpError(404, '找不到這個簽名，可能已經結束或網址不完整');
+    const u = await authUser(req, env, false);
+    if (!u) throw new HttpError(401, '請先用 Google 帳號登入', { need_login: true });
+    if (!u.email || !u.email_verified) throw new HttpError(403, '這個 Google 帳號的 Email 還沒驗證，請換一個帳號登入', { wrong_account: true });
+    const mode = modeOf(b), expired = !!(b.deadline && now() > b.deadline + DAY), sub = m[2] || '';
+    const info = { name: b.name, org: b.org_name, message: b.message, deadline: b.deadline, mode };
+    if (mode !== 'open') {
+      if (sub) throw new HttpError(404, '找不到這個功能');
+      const like = '%' + JSON.stringify({ email: u.email }).slice(1, -1) + '%';
+      const { results } = await env.DB.prepare('SELECT * FROM docs WHERE batch_id = ? AND (email = ? OR signers LIKE ?) ORDER BY filename').bind(b.id, u.email, like).all();
+      const docs = [];
+      for (const d of results) {
+        const s = signersOf(d), c = curOf(d, s), me = s.findIndex(x => x.email === u.email); if (me < 0) continue;
+        docs.push({ token: d.token, filename: d.filename, status: d.status, total: s.length, cur: c, my_turn: me === c, my_done: me < c, done: c >= s.length, waiting: me > c ? (s[c].name || maskEmail(s[c].email)) : null });
+      }
+      return J({ batch: info, expired, email: u.email, docs });
+    }
+    // ----- 連署 -----
+    const mine = await env.DB.prepare('SELECT * FROM docs WHERE batch_id = ? AND email = ? ORDER BY created_at LIMIT 1').bind(b.id, u.email).first();
+    const count = (await env.DB.prepare("SELECT COUNT(*) AS n FROM docs WHERE batch_id = ?").bind(b.id).first()).n;
+    const full = !!(b.max_signers && count >= b.max_signers);
+    if (!sub) return J({ batch: info, expired, email: u.email, name: u.name, mine: mine ? { token: mine.token, status: mine.status } : null, count, max: b.max_signers || null, full: full && !mine, has_file: !!b.tpl_key, filename: b.tpl_name });
+    if (!b.tpl_key) throw new HttpError(409, '發起人還沒放上要簽的文件');
+    if (sub === '/file' && M === 'GET') { const obj = await fileGet(env, b.tpl_key); if (!obj) throw new HttpError(404, '檔案不存在'); return fileResponse(obj, b.tpl_name || 'document.pdf', req, env); }
+    if (sub !== '/submit' || M !== 'POST') throw new HttpError(404, '找不到這個功能');
+    if (mine) throw new HttpError(409, '你已經簽過了', { token: mine.token });
+    if (expired) throw new HttpError(403, '已經超過簽名期限，請聯絡發起人');
+    if (full) throw new HttpError(409, `這份連署的名額（${b.max_signers} 人）已經滿了`);
+    if (count >= intVar(env, 'MAX_BATCH_DOCS', 3000)) throw new HttpError(409, '這份連署的人數已經到上限了');
+    const buf = await readPdf(req, env); await storageCheck(env, b, buf.byteLength);
+    let credit;
+    try { credit = await spendCredit(env, { uid: b.owner_uid }, b); }
+    catch (e) { if (e.status === 402) throw new HttpError(403, '發起人的簽名份數已經用完，暫時不能簽，請通知發起人'); throw e; }
+    const id = randId(9), token = randId(24), key = `b/${b.id}/${id}/s1-${randId(6)}.pdf`, t = now(), ip = req.headers.get('CF-Connecting-IP') || '';
+    const nm = String(u.name || '').slice(0, 60);
+    const s = [{ email: u.email, name: nm, at: t, ip, key, size: buf.byteLength, by: u.email }];
+    const fn = `${String(b.tpl_name || '連署').replace(/\.pdf$/i, '')}-${(nm || u.email).replace(/[\\/:*?"<>|]/g, '_')}.pdf`.slice(0, 200);
+    let r;
+    try {
+      await filePut(env, key, buf);
+      r = await env.DB.prepare(`INSERT INTO docs (id, batch_id, owner_uid, filename, student_id, student_name, email, token, status, orig_key, orig_size, signed_key, signed_size, signed_at, signed_ip, signed_email, signers, cur, sent_count, created_at, credit, charged)
+        SELECT ?, ?, ?, ?, '', ?, ?, ?, 'signed', NULL, 0, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, 1 WHERE NOT EXISTS (SELECT 1 FROM docs WHERE batch_id = ? AND email = ?)`)
+        .bind(id, b.id, b.owner_uid, fn, nm, u.email, token, key, buf.byteLength, t, ip, u.email, JSON.stringify(s), t, credit, b.id, u.email).run();
+    } catch (e) { await refundCredit(env, b.owner_uid, credit); try { await deleteKeys(env, [key]); } catch (e2) { } throw e; }
+    if (!r.meta.changes) { await refundCredit(env, b.owner_uid, credit); await deleteKeys(env, [key]); throw new HttpError(409, '你已經簽過了'); }
+    return J({ ok: true, token, signed_at: t });
   }
 
   /* ---------- 批次管理（需登入） ---------- */
@@ -404,18 +526,20 @@ async function route(req, env, ctx) {
       if (open.n >= intVar(env, 'FREE_MAX_BATCHES', 2)) throw new HttpError(402, `免費試用最多同時有 ${intVar(env, 'FREE_MAX_BATCHES', 2)} 個批次，請先刪除舊的試用批次，或購買簽名份數`, { need_pay: true });
     }
     const retain = batchKeep(env, acc, !paid, x.forever ? 'forever' : (x.retain_until || (acc.paid ? 'forever' : undefined)), now());
-    const id = randId(9);
-    await env.DB.prepare('INSERT INTO batches (id, owner_uid, name, org_name, message, deadline, require_login, retain_until, created_at, trial) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .bind(id, u.uid, name, String(x.org_name || '').slice(0, 100), String(x.message || '').slice(0, 2000), +x.deadline || null, x.require_login === false ? 0 : 1, retain, now(), paid ? 0 : 1).run();
-    return J({ id, retain_until: retain, forever: retain === null, trial: !paid });
+    const id = randId(9), link = randId(16), mode = MODES.includes(x.mode) ? x.mode : 'list';
+    const maxS = mode === 'open' && +x.max_signers > 0 ? Math.min(+x.max_signers | 0, intVar(env, 'MAX_BATCH_DOCS', 3000)) : null;
+    // 一律要用 Google 帳號登入才能簽（第一次登入就等於註冊），不再提供「持有網址就能簽」
+    await env.DB.prepare('INSERT INTO batches (id, owner_uid, name, org_name, message, deadline, require_login, retain_until, created_at, trial, mode, link, max_signers) VALUES (?,?,?,?,?,?,1,?,?,?,?,?,?)')
+      .bind(id, u.uid, name, String(x.org_name || '').slice(0, 100), String(x.message || '').slice(0, 2000), +x.deadline || null, retain, now(), paid ? 0 : 1, mode, link, maxS).run();
+    return J({ id, retain_until: retain, forever: retain === null, trial: !paid, join_url: joinUrl(env, link, req) });
   }
   if ((m = p.match(/^\/api\/batches\/([^/]+)$/))) {
     const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]);
     if (M === 'GET') {
-      const { results } = await env.DB.prepare('SELECT * FROM docs WHERE batch_id = ? ORDER BY filename').bind(b.id).all();
-      const acc = await account(u, env);
+      const { results } = await env.DB.prepare(`SELECT * FROM docs WHERE batch_id = ? ORDER BY ${modeOf(b) === 'open' ? 'created_at DESC' : 'filename'}`).bind(b.id).all();
+      const acc = await account(u, env); const link = await ensureLink(env, b);
       const room = Math.min(intVar(env, 'MAX_BATCH_DOCS', 3000) - results.length, (b.trial ? acc.credits.trial : 0) + acc.credits.paid);
-      return J({ batch: b, docs: results.map(d => docOut(env, d, req)), doc_limit: results.length + Math.max(0, room), credits: acc.credits });
+      return J({ batch: { ...b, mode: modeOf(b), join_url: joinUrl(env, link, req), max_per_doc: maxSigners(b) }, docs: results.map(d => docOut(env, d, req)), doc_limit: results.length + Math.max(0, room), credits: acc.credits });
     }
     if (M === 'PATCH') {
       const x = await body(req);
@@ -424,8 +548,10 @@ async function route(req, env, ctx) {
         const r = batchKeep(env, acc, !!b.trial, x.forever ? 'forever' : x.retain_until, b.created_at, b.retain_until);
         await env.DB.prepare('UPDATE batches SET retain_until = ? WHERE id = ?').bind(r, b.id).run();
       }
-      await env.DB.prepare('UPDATE batches SET name = COALESCE(?, name), org_name = COALESCE(?, org_name), message = COALESCE(?, message), deadline = COALESCE(?, deadline), require_login = COALESCE(?, require_login) WHERE id = ?')
-        .bind(x.name ?? null, x.org_name ?? null, x.message ?? null, x.deadline ?? null, x.require_login == null ? null : (x.require_login ? 1 : 0), b.id).run();
+      await env.DB.prepare('UPDATE batches SET name = COALESCE(?, name), org_name = COALESCE(?, org_name), message = COALESCE(?, message), deadline = COALESCE(?, deadline) WHERE id = ?')
+        .bind(x.name ?? null, x.org_name ?? null, x.message ?? null, x.deadline ?? null, b.id).run();
+      if (x.max_signers !== undefined && modeOf(b) === 'open')
+        await env.DB.prepare('UPDATE batches SET max_signers = ? WHERE id = ?').bind(+x.max_signers > 0 ? Math.min(+x.max_signers | 0, intVar(env, 'MAX_BATCH_DOCS', 3000)) : null, b.id).run();
       return J({ ok: true });
     }
     if (M === 'DELETE') {
@@ -434,28 +560,43 @@ async function route(req, env, ctx) {
   }
   if ((m = p.match(/^\/api\/batches\/([^/]+)\/docs$/)) && M === 'POST') {
     const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]);
+    if (modeOf(b) === 'open') throw new HttpError(400, '連署是大家簽同一份文件，請用「放上要連署的文件」上傳');
     const max = intVar(env, 'MAX_BATCH_DOCS', 3000);
     const c = await env.DB.prepare('SELECT COUNT(*) AS n FROM docs WHERE batch_id = ?').bind(b.id).first();
     if (c.n >= max) throw new HttpError(413, `一個批次最多 ${max} 份文件，請另外建立一個批次`);
     const buf = await readPdf(req, env);
-    const lim = storageLimits(env);
-    if (lim.hard > 0 && (await storedBytes(env)) + buf.byteLength > lim.hard)   // 檔案存在 D1 時，滿了就不能再上傳，免得整個資料庫寫不進去
-      throw new HttpError(503, '網站的檔案空間已滿，請先刪除已經不用的批次，或聯絡網站管理者', { storage_full: true });
-    if (b.trial) {   // 免費試用的總空間到警戒線時，先停止試用上傳；付費的照常
-      const guard = lim.guard;
-      if (guard > 0 && (await storedBytes(env)) + buf.byteLength > guard) throw new HttpError(503, '網站的免費試用空間暫時額滿，請過幾天再試，或購買簽名份數後馬上就能上傳', { need_pay: true, storage_full: true });
-    }
+    await storageCheck(env, b, buf.byteLength);
     let meta = {}; try { meta = JSON.parse(decodeURIComponent(req.headers.get('X-Meta') || '%7B%7D')); } catch (e) { }
     const filename = String(meta.filename || 'document.pdf').slice(0, 200);
+    let sg = cleanSigners(Array.isArray(meta.signers) ? meta.signers : [{ email: meta.email, name: meta.student_name }], maxSigners(b));
+    if (!sg.length) sg = [{ email: '', name: String(meta.student_name || '').slice(0, 60) }];
     const credit = await spendCredit(env, u, b);
     const id = randId(9), token = randId(24), key = `b/${b.id}/${id}/orig.pdf`;
     try {
       await filePut(env, key, buf);
-      await env.DB.prepare("INSERT INTO docs (id, batch_id, owner_uid, filename, student_id, student_name, email, token, status, orig_key, orig_size, sent_count, created_at, credit, charged) VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?, 0, ?, ?, 0)")
-        .bind(id, b.id, u.uid, filename, String(meta.student_id || '').slice(0, 40), String(meta.student_name || '').slice(0, 60), normEmail(meta.email).slice(0, 200), token, key, buf.byteLength, now(), credit).run();
+      await env.DB.prepare("INSERT INTO docs (id, batch_id, owner_uid, filename, student_id, student_name, email, token, status, orig_key, orig_size, sent_count, created_at, credit, charged, signers, cur) VALUES (?,?,?,?,?,?,?,?, 'pending', ?, ?, 0, ?, ?, 0, ?, 0)")
+        .bind(id, b.id, u.uid, filename, String(meta.student_id || '').slice(0, 40), String(meta.student_name || sg[0].name || '').slice(0, 60), sg[0].email, token, key, buf.byteLength, now(), credit, JSON.stringify(sg)).run();
     } catch (e) { await refundCredit(env, u.uid, credit); try { await deleteKeys(env, [key]); } catch (e2) { } throw e; }
     const d = await env.DB.prepare('SELECT * FROM docs WHERE id = ?').bind(id).first();
     return J({ doc: docOut(env, d, req) });
+  }
+  if ((m = p.match(/^\/api\/batches\/([^/]+)\/template$/)) && M === 'POST') {   // 連署：放上大家要簽的那一份文件
+    const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]);
+    if (modeOf(b) !== 'open') throw new HttpError(400, '只有連署需要放共用的文件');
+    const n = (await env.DB.prepare('SELECT COUNT(*) AS n FROM docs WHERE batch_id = ?').bind(b.id).first()).n;
+    if (n) throw new HttpError(409, `已經有 ${n} 個人簽了，不能再換文件。要換文件請另外建立一個連署`);
+    const buf = await readPdf(req, env); await storageCheck(env, b, buf.byteLength);
+    let meta = {}; try { meta = JSON.parse(decodeURIComponent(req.headers.get('X-Meta') || '%7B%7D')); } catch (e) { }
+    const key = `b/${b.id}/tpl-${randId(6)}.pdf`;
+    await filePut(env, key, buf);
+    await env.DB.prepare('UPDATE batches SET tpl_key = ?, tpl_name = ?, tpl_size = ? WHERE id = ?').bind(key, String(meta.filename || 'document.pdf').slice(0, 200), buf.byteLength, b.id).run();
+    if (b.tpl_key) await deleteKeys(env, [b.tpl_key]);
+    return J({ ok: true });
+  }
+  if ((m = p.match(/^\/api\/batches\/([^/]+)\/template$/)) && M === 'GET') {
+    const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]);
+    const obj = b.tpl_key && await fileGet(env, b.tpl_key); if (!obj) throw new HttpError(404, '還沒放上文件');
+    return fileResponse(obj, b.tpl_name || 'document.pdf', req, env);
   }
   if ((m = p.match(/^\/api\/batches\/([^/]+)\/mark-sent$/)) && M === 'POST') {    // 匯出／複製名單後標記為「已發出」（只是狀態，不影響份數）
     const u = await authUser(req, env); const b = await ownBatch(env, u, m[1]); const x = await body(req);
@@ -467,30 +608,48 @@ async function route(req, env, ctx) {
     const u = await authUser(req, env); const d = await ownDoc(env, u, m[1]);
     if (M === 'PATCH') {
       const x = await body(req);
-      await env.DB.prepare('UPDATE docs SET email = COALESCE(?, email), student_name = COALESCE(?, student_name), student_id = COALESCE(?, student_id) WHERE id = ?')
-        .bind(x.email == null ? null : normEmail(x.email), x.student_name ?? null, x.student_id ?? null, d.id).run();
+      if (x.signers || x.email != null) {   // 改簽名人：已經簽好的人不能改，後面還沒簽的可以改、加、減
+        const b = await ownBatch(env, u, d.batch_id); const s = signersOf(d), c = curOf(d, s);
+        if (modeOf(b) === 'open') throw new HttpError(400, '連署的簽名人不能修改');
+        if (c >= s.length) throw new HttpError(409, '這份文件已經全部簽好了，不能再改簽名人');
+        const want = Array.isArray(x.signers) ? x.signers.slice(c) : [{ email: x.email, name: s[0].name || d.student_name }];
+        if (!Array.isArray(x.signers) && c > 0) throw new HttpError(409, '已經有人簽了，請改用簽名人設定');
+        const rest = cleanSigners(want, maxSigners(b) - c, s.slice(0, c).map(z => z.email));
+        if (!rest.length) rest.push({ email: '', name: '' });
+        const ns = s.slice(0, c).concat(rest);
+        await env.DB.prepare('UPDATE docs SET signers = ?, cur = ?, email = ? WHERE id = ?').bind(JSON.stringify(ns), c, ns[0].email, d.id).run();
+      }
+      await env.DB.prepare('UPDATE docs SET student_name = COALESCE(?, student_name), student_id = COALESCE(?, student_id) WHERE id = ?')
+        .bind(x.student_name ?? null, x.student_id ?? null, d.id).run();
       return J({ doc: docOut(env, await env.DB.prepare('SELECT * FROM docs WHERE id = ?').bind(d.id).first(), req) });
     }
     if (M === 'DELETE') {
-      await deleteKeys(env, [d.orig_key, d.signed_key]); await env.DB.prepare('DELETE FROM docs WHERE id = ?').bind(d.id).run();
+      await deleteKeys(env, [...new Set(docKeys(d))]); await env.DB.prepare('DELETE FROM docs WHERE id = ?').bind(d.id).run();
       const back = refundable(d) ? (await refundCredit(env, u.uid, d.credit), true) : false;
       return J({ ok: true, refunded: back });
     }
   }
   if ((m = p.match(/^\/api\/docs\/([^/]+)\/file$/)) && M === 'GET') {
     const u = await authUser(req, env); const d = await ownDoc(env, u, m[1]);
-    const signed = url.searchParams.get('v') === 'signed'; const key = signed ? d.signed_key : d.orig_key;
+    const signed = url.searchParams.get('v') === 'signed';
+    const key = signed ? d.signed_key : (d.orig_key || (await ownBatch(env, u, d.batch_id)).tpl_key);
     if (!key) throw new HttpError(404, '這份文件還沒有簽名檔');
     const obj = await fileGet(env, key); if (!obj) throw new HttpError(404, '檔案不存在');
     return fileResponse(obj, signed ? signedName(d.filename) : d.filename, req, env, url.searchParams.get('dl') !== '1');
   }
   if ((m = p.match(/^\/api\/docs\/([^/]+)\/return$/)) && M === 'POST') {
     const u = await authUser(req, env); const d = await ownDoc(env, u, m[1]); const x = await body(req);
-    if (d.status !== 'signed') throw new HttpError(409, '這份文件還沒簽名，不需要退回');
-    const reason = String(x.reason || '').slice(0, 500);
-    await env.DB.prepare("UPDATE docs SET status = 'returned', signed_key = NULL, signed_size = NULL, signed_at = NULL, return_reason = ? WHERE id = ?").bind(reason, d.id).run();
-    if (d.signed_key) await deleteKeys(env, [d.signed_key]);
-    return J({ ok: true, sign_url: signUrl(env, d.token, req) });
+    const s = signersOf(d), c = curOf(d, s);
+    if (!c) throw new HttpError(409, '這份文件還沒有人簽名，不需要退回');
+    const from = Math.max(0, Math.min(c - 1, parseInt(x.from, 10) || 0));   // 從第幾個人開始重簽（0 = 第 1 個人）
+    const drop = s.slice(from, c).map(z => z.key).filter(Boolean);
+    for (let i = from; i < s.length; i++) s[i] = { email: s[i].email, name: s[i].name };
+    const reason = String(x.reason || '').slice(0, 500), prev = keyBefore({}, s, from) ;
+    await env.DB.prepare("UPDATE docs SET status = 'returned', signers = ?, cur = ?, signed_key = ?, signed_size = ?, signed_at = ?, return_reason = ? WHERE id = ?")
+      .bind(JSON.stringify(s), from, prev, sizeOf(s) || null, from ? s[from - 1].at : null, reason, d.id).run();
+    if (drop.length) await deleteKeys(env, drop);
+    const b = await ownBatch(env, u, d.batch_id);
+    return J({ ok: true, sign_url: joinUrl(env, await ensureLink(env, b), req), who: s.slice(from).map(z => z.name || z.email) });
   }
 
   /* ---------- 付款（綠界） ---------- */
@@ -732,10 +891,21 @@ const SCHEMA = [
 ];
 let schemaReady = null;
 /* 舊資料庫升級：docs 加 charged 欄位（有簽名才算份數）。已經簽過（含退回重簽）的算已扣，其他的之後刪除會退回 */
+const colCache = {};
+async function addColumn(env, table, col) {
+  if (!colCache[table]) { try { colCache[table] = new Set((await env.DB.prepare(`PRAGMA table_info(${table})`).all()).results.map(r => r.name)); } catch (e) { colCache[table] = new Set(); } }
+  if (colCache[table].has(col.split(' ')[0])) return false;   // 已經有這個欄位，不用再改
+  try { await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${col}`).run(); return true; }
+  catch (e) { if (/duplicate column/i.test(String(e && e.message))) return false; throw e; }
+}
 async function upgradeSchema(env) {
-  try { await env.DB.prepare('ALTER TABLE docs ADD COLUMN charged INTEGER DEFAULT 0').run(); }
-  catch (e) { if (!/duplicate column/i.test(String(e && e.message))) throw e; return; }
-  await env.DB.prepare("UPDATE docs SET charged = CASE WHEN status IN ('signed', 'returned') OR signed_at IS NOT NULL THEN 1 ELSE 0 END").run();
+  if (await addColumn(env, 'docs', 'charged INTEGER DEFAULT 0'))
+    await env.DB.prepare("UPDATE docs SET charged = CASE WHEN status IN ('signed', 'returned') OR signed_at IS NOT NULL THEN 1 ELSE 0 END").run();
+  /* 2026/11：三種簽名方式（指定人員／多人簽同一份／連署）＋共用簽名網址 */
+  for (const c of ["mode TEXT DEFAULT 'list'", 'link TEXT', 'tpl_key TEXT', 'tpl_name TEXT', 'tpl_size INTEGER', 'max_signers INTEGER']) await addColumn(env, 'batches', c);
+  for (const c of ['signers TEXT', 'cur INTEGER DEFAULT 0']) await addColumn(env, 'docs', c);
+  await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_link ON batches(link)').run();
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_docs_batch_email ON docs(batch_id, email)').run();
 }
 const FILE_SCHEMA = [`CREATE TABLE IF NOT EXISTS files (key TEXT NOT NULL, part INTEGER NOT NULL, data BLOB, created_at INTEGER, PRIMARY KEY (key, part))`];
 function ensureSchema(env) {
