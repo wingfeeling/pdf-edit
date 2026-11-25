@@ -1629,8 +1629,14 @@ function hexOf(a) {
 async function pageGraphics(page, vp) {
   const O = pdfjsLib.OPS, U = pdfjsLib.Util, ol = await page.getOperatorList();
   let ctm = vp.transform.slice(), fill = '000000', stroke = '000000', lw = 1; const st = [];
-  const H = [], V = [], boxes = []; let path = [];
+  const H = [], V = [], boxes = [], imgs = []; let path = [];
   const T = (x, y) => U.applyTransform([x, y], ctm);
+  // an image is drawn into the unit square of the current matrix; m = extra matrix for the "repeat" variants
+  const imgBox = m => {
+    const M = m ? U.transform(ctm, m) : ctm;
+    const q = [[0, 0], [1, 0], [0, 1], [1, 1]].map(p => U.applyTransform(p, M)); const xs = q.map(v => v[0]), ys = q.map(v => v[1]);
+    imgs.push({ x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) });
+  };
   const seg = (a, b, w, col) => {
     const dx = Math.abs(a[0] - b[0]), dy = Math.abs(a[1] - b[1]);
     if (dy < 0.8 && dx > 2.5) H.push({ y: (a[1] + b[1]) / 2, x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]), w, col });
@@ -1689,9 +1695,13 @@ async function pageGraphics(page, vp) {
       case O.fill: case O.eoFill: paint(false, true); break;
       case O.fillStroke: case O.eoFillStroke: case O.closeFillStroke: case O.closeEOFillStroke: paint(true, true); break;
       case O.endPath: path = []; break;
+      case O.paintImageXObject: case O.paintInlineImageXObject: case O.paintImageMaskXObject: case O.paintJpegXObject: case O.paintSolidColorImageMask: imgBox(null); break;
+      case O.paintImageXObjectRepeat: { const sx = a[1], sy = a[2], ps = a[3] || []; for (let k = 0; k + 1 < ps.length; k += 2) imgBox([sx, 0, 0, sy, ps[k], ps[k + 1]]); break; }
+      case O.paintImageMaskXObjectRepeat: { const t = a[1] || [1, 0, 0, 1, 0, 0], cnt = a[2] || 0; for (let k = 0; k < cnt; k++) imgBox(t); break; }
+      case O.paintInlineImageXObjectGroup: case O.paintImageMaskXObjectGroup: { for (const g of (fn === O.paintInlineImageXObjectGroup ? (a[1] || []) : (a[0] || []))) imgBox(g.transform || null); break; }
     }
   }
-  return { H, V, boxes };
+  return { H, V, boxes, imgs };
 }
 function mergeSegs(S, key, a0, a1) {
   S = S.slice().sort((p, q) => p[key] - q[key] || p[a0] - q[a0]); const out = [];
@@ -1818,6 +1828,10 @@ function cellChildren(D, cell, tw) {
   // vertical position of the text inside the cell
   let va = D.VerticalAlign.CENTER;
   if (lines.length) { const top = lines[0].top - cell.y0, bot = cell.y1 - lines[lines.length - 1].bot; if (top < bot * 0.45 && bot > 10) va = D.VerticalAlign.TOP; else if (bot < top * 0.45 && top > 10) va = D.VerticalAlign.BOTTOM; }
+  for (const pic of (cell.pics || [])) {
+    const cw2 = cell.x1 - cell.x0 - 6, mid2 = (pic.x0 + pic.x1) / 2;
+    out.push(new D.Paragraph({ alignment: Math.abs(mid2 - mid) < 0.12 * cw ? D.AlignmentType.CENTER : D.AlignmentType.LEFT, spacing: { before: 0, after: 0 }, children: [picRun(D, pic, Math.max(10, cw2))] }));
+  }
   return { children: out.length ? out : [new D.Paragraph({ spacing: { before: 0, after: 0, line: 240 }, children: [new D.TextRun({ text: '', size: 16 })] })], va };
 }
 function mkTable(D, t, left, tw) {
@@ -1888,10 +1902,51 @@ function eraseText(x, items, sc, pad) {
   }
 }
 
+/* ---- pictures inside the PDF: where they are, and a crop of each ---- */
+function pictureBoxes(raw, W, H, isScan) {
+  let bs = raw.map(b => ({ x0: Math.max(0, b.x0), x1: Math.min(W, b.x1), y0: Math.max(0, b.y0), y1: Math.min(H, b.y1) }))
+    .filter(b => b.x1 - b.x0 >= 6 && b.y1 - b.y0 >= 6 && (b.x1 - b.x0) * (b.y1 - b.y0) >= 80);
+  // a picture stored as several tiles / layers is one picture
+  for (let merged = true; merged;) {
+    merged = false;
+    outer: for (let i = 0; i < bs.length; i++) for (let j = i + 1; j < bs.length; j++) {
+      const a = bs[i], b = bs[j];
+      if (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) > -1.5 && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) > -1.5) {
+        bs[i] = { x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) }; bs.splice(j, 1); merged = true; break outer;
+      }
+    }
+  }
+  const full = b => (b.x1 - b.x0) * (b.y1 - b.y0) > 0.6 * W * H;
+  if (isScan) bs = bs.filter(b => !full(b));                     // the scan itself: its words were read by OCR
+  return bs.map(b => ({ ...b, full: full(b) })).sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+}
+async function cropPictures(page, rot, pics, items, W, H) {
+  if (!pics.length) return;
+  const sc = Math.max(1, Math.min(3, Math.sqrt(MAX_PX / (W * H))));
+  const vp = page.getViewport({ scale: sc, rotation: rot }); const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  const x = c.getContext('2d', { willReadFrequently: true }); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  x.fillText = () => { }; x.strokeText = () => { };                // real text goes into Word as text, not into the picture
+  await page.render({ canvasContext: x, viewport: vp }).promise;
+  for (const p of pics) {
+    // a page-sized picture with words on it is a scanned page: wipe the words that Word will show as text
+    if (p.full) eraseText(x, items.filter(it => it.x0 >= p.x0 - 2 && it.x1 <= p.x1 + 2 && it.top >= p.y0 - 2 && it.bot <= p.y1 + 2), sc, 1.2);
+    const sx = Math.floor(p.x0 * sc), sy = Math.floor(p.y0 * sc), sw = Math.max(1, Math.min(c.width - sx, Math.ceil((p.x1 - p.x0) * sc))), sh = Math.max(1, Math.min(c.height - sy, Math.ceil((p.y1 - p.y0) * sc)));
+    const o = document.createElement('canvas'); o.width = sw; o.height = sh; o.getContext('2d').drawImage(c, sx, sy, sw, sh, 0, 0, sw, sh);
+    const png = sw * sh < 250000;                                 // small logos / icons stay crisp as PNG, photos as JPEG
+    p.data = await (await canvasBlob(o, png ? 'image/png' : 'image/jpeg', 0.92)).arrayBuffer(); o.width = o.height = 0;
+  }
+  c.width = c.height = 0;
+}
+const PX = pt => Math.max(1, Math.round(pt * 96 / 72)), EMU = pt => Math.round(pt * 12700);
+function picRun(D, p, maxW, floating) {
+  let w = p.x1 - p.x0, h = p.y1 - p.y0; if (maxW && w > maxW) { h = h * maxW / w; w = maxW; }
+  return new D.ImageRun({ data: p.data, transformation: { width: PX(w), height: PX(h) }, ...(floating ? { floating } : {}) });
+}
+
 /* ---- PDF → Word ---- */
 async function pdfToWord(pdf, mode, useOcr, base) {
   const D = await loadLib('docx');
-  const sections = []; let scanned = 0, tablesFound = 0;
+  const sections = []; let scanned = 0, tablesFound = 0, picsFound = 0;
   for (let i = 1; i <= pdf.numPages; i++) {
     busy(`轉成 Word 中（${i}/${pdf.numPages}）…`, i / pdf.numPages);
     const page = await pdf.getPage(i); const vp1 = page.getViewport({ scale: 1 });
@@ -1939,32 +1994,72 @@ async function pdfToWord(pdf, mode, useOcr, base) {
       continue;
     }
 
-    // editable flow: real tables + paragraphs
-    let tables = [];
-    if (!isScan) { try { tables = findTables(await pageGraphics(page, pi.vp), W, H); } catch (e) { console.warn('table detection failed', e); tables = []; } }
+    // editable flow: real tables + paragraphs + pictures
+    let tables = [], pics = [];
+    try {
+      const gr = await pageGraphics(page, isScan ? page.getViewport({ scale: 1 }) : pi.vp);
+      if (!isScan) { try { tables = findTables(gr, W, H); } catch (e) { console.warn('table detection failed', e); tables = []; } }
+      pics = pictureBoxes(gr.imgs || [], W, H, isScan);
+    } catch (e) { console.warn('picture detection failed', e); pics = []; }
+    if (isScan && pics.length) {                                    // words OCR read off a photo are already in the photo
+      const inPic = it => pics.some(p => (it.x0 + it.x1) / 2 > p.x0 && (it.x0 + it.x1) / 2 < p.x1 && (it.top + it.bot) / 2 > p.y0 && (it.top + it.bot) / 2 < p.y1);
+      items = items.filter(it => !inPic(it));
+    }
+    try { await cropPictures(page, isScan ? 0 : pi.vp.rotation, pics, items, W, H); } catch (e) { console.warn('picture crop failed', e); pics = []; }
+    pics = pics.filter(p => p.data);
+    picsFound += pics.length;
     tablesFound += tables.length;
+    // a picture inside a table cell goes into that cell
+    pics = pics.filter(p => {
+      const cx = (p.x0 + p.x1) / 2, cy = (p.y0 + p.y1) / 2;
+      for (const t of tables) for (const cell of t.cells) if (cx > cell.x0 && cx < cell.x1 && cy > cell.y0 && cy < cell.y1 && p.x1 - p.x0 < (cell.x1 - cell.x0) + 4) { (cell.pics = cell.pics || []).push(p); return false; }
+      return true;
+    });
     const free = assignToTables(items, tables);
     const lines = toLines(free, 1.6);
-    const xsL = lines.map(l => l.x0).concat(tables.map(t => t.x0)), xsR = lines.map(l => l.x1).concat(tables.map(t => t.x1));
+    // text beside a picture or printed over it: the picture keeps its exact spot on the page; otherwise it sits in the text flow
+    for (const p of pics) {
+      const across = lines.filter(l => Math.min(l.bot, p.y1) - Math.max(l.top, p.y0) > 0.3 * Math.min(l.bot - l.top, p.y1 - p.y0));
+      p.over = p.full || across.some(l => Math.min(l.x1, p.x1) - Math.max(l.x0, p.x0) > 2);
+      p.side = !p.over && across.length > 0;
+    }
+    const inl = pics.filter(p => !p.over && !p.side), fixed = pics.filter(p => p.over || p.side);
+    const xsL = lines.map(l => l.x0).concat(tables.map(t => t.x0), inl.map(p => p.x0)), xsR = lines.map(l => l.x1).concat(tables.map(t => t.x1), inl.map(p => p.x1));
     const left = xsL.length ? Math.max(18, Math.min(90, Math.min(...xsL) - 2)) : 72;
     const rightM = xsR.length ? Math.max(14, Math.min(90, W - Math.max(...xsR) - 2)) : 72;
-    const tops = lines.map(l => l.top).concat(tables.map(t => t.y0));
+    const tops = lines.map(l => l.top).concat(tables.map(t => t.y0), inl.map(p => p.y0));
     const topM = tops.length ? Math.max(18, Math.min(90, Math.min(...tops) - 2)) : 72;
     const textW = W - left - rightM;
     const paras = [];
     for (let k = 0; k < lines.length; k++) {
       const l = lines[k], p = paras[paras.length - 1], prev = lines[k - 1];
       const gap = prev ? l.top - prev.bot : 0;
-      const between = prev && tables.some(t => t.y0 > prev.bot - 1 && t.y0 < l.top);
+      const between = prev && (tables.some(t => t.y0 > prev.bot - 1 && t.y0 < l.top) || inl.some(q => q.y0 > prev.bot - 1 && q.y0 < l.top));
       const wrapped = prev && p && !between && gap < 0.7 * l.size && Math.abs(l.size - p.size) < 0.18 * p.size && prev.x1 > left + textW * 0.8 && Math.abs(l.x0 - p.lines[0].x0) < 3 * l.size && !l.text.includes('\t');
       if (wrapped) { p.lines.push(l); p.text = joinStr(p.text, l.text, 1, 1); }
       else paras.push({ lines: [l], text: l.text, size: l.size, x0: l.x0 });
     }
-    const blocks = paras.map(p => ({ top: p.lines[0].top, bot: p.lines[p.lines.length - 1].bot, p })).concat(tables.map(t => ({ top: t.y0, bot: t.y1, t }))).sort((a, b) => a.top - b.top);
+    const blocks = paras.map(p => ({ top: p.lines[0].top, bot: p.lines[p.lines.length - 1].bot, p })).concat(tables.map(t => ({ top: t.y0, bot: t.y1, t })), inl.map(q => ({ top: q.y0, bot: q.y1, q }))).sort((a, b) => a.top - b.top);
+    // fixed pictures ride on the paragraph nearest to them (they are positioned against the page, so which one does not move them)
+    const floatRuns = fixed.map(q => picRun(D, q, 0, {
+      horizontalPosition: { relative: 'page', offset: EMU(q.x0) }, verticalPosition: { relative: 'page', offset: EMU(q.y0) },
+      allowOverlap: true, lockAnchor: true, behindDocument: q.over, zIndex: q.over ? 0 : 1,
+      wrap: q.over ? { type: D.TextWrappingType.NONE } : { type: D.TextWrappingType.SQUARE, side: D.TextWrappingSide.BOTH_SIDES },
+      margins: q.over ? undefined : { left: EMU(4), right: EMU(4), top: 0, bottom: 0 }
+    }));
     const children = []; let prevBot = topM, lastTable = false;
     for (const b of blocks) {
       const gap = Math.max(0, b.top - prevBot);
-      if (b.t) {
+      if (b.q) {
+        const q = b.q, w = Math.min(q.x1 - q.x0, textW), mid = (q.x0 + q.x1) / 2;
+        const center = Math.abs(mid - (left + W - rightM) / 2) < W * 0.06 && q.x0 - left > 20;
+        children.push(new D.Paragraph({
+          alignment: center ? D.AlignmentType.CENTER : D.AlignmentType.LEFT, indent: center ? undefined : { left: tw(Math.max(0, Math.min(q.x0 - left, textW - w))) },
+          spacing: { before: tw(Math.min(lastTable ? Math.max(0, gap - 2) : gap * 0.85, 200)), after: 0 },
+          children: [picRun(D, q, textW)]
+        }));
+        lastTable = false;
+      } else if (b.t) {
         if (lastTable || !children.length || gap > 1.5) children.push(spacer(D, Math.min(gap, 200)));
         children.push(mkTable(D, b.t, left, tw)); lastTable = true;
       } else {
@@ -1983,12 +2078,13 @@ async function pdfToWord(pdf, mode, useOcr, base) {
       prevBot = Math.max(prevBot, b.bot);
     }
     if (!children.length || lastTable) children.push(spacer(D, 1));
+    if (floatRuns.length) children.unshift(new D.Paragraph({ spacing: { before: 0, after: 0, line: 20, lineRule: 'exact' }, children: floatRuns }));
     sections.push({ properties: { page: { size: { width: tw(W), height: tw(H) }, margin: { top: tw(topM), bottom: tw(18), left: tw(left), right: tw(rightM), header: 0, footer: 0 } } }, children });
   }
   const doc = new D.Document({ creator: (window.APP_CONFIG && APP_CONFIG.siteName) || 'PDF 編輯器', title: base, styles: { default: { document: { run: { font: WFONT } } } }, sections });
   busy('產生 Word 檔中…');
   const blob = await D.Packer.toBlob(doc); saveBlob(new Blob([blob], { type: MIME.docx }), `${base}.docx`);
-  window.__lastWord = { tables: tablesFound, scanned };
+  window.__lastWord = { tables: tablesFound, scanned, pictures: picsFound };
   return scanned;
 }
 
@@ -2490,7 +2586,7 @@ function openConvert() {
     CV.fmt = f; document.querySelectorAll('#cvFmt button').forEach(b => b.classList.toggle('on', b.dataset.v === f));
     const o = $('#cvOpts');
     if (f === 'jpg' || f === 'png') o.innerHTML = `<div class="row">解析度 <select id="cvDpi"><option value="96">96 dpi（小檔）</option><option value="150" selected>150 dpi（一般）</option><option value="300">300 dpi（列印）</option></select></div><div class="row"><label><input type="checkbox" id="cvZip" checked> 多頁時打包成 ZIP</label></div>`;
-    else if (f === 'docx') o.innerHTML = `<div class="row"><label><input type="radio" name="cvWm" value="text" checked> <b>可編輯（建議）</b>：保留表格、合併儲存格、底色和粗體，可以直接增刪內容</label></div><div class="row"><label><input type="radio" name="cvWm" value="layout"> <b>版面跟原檔一樣</b>：框線和圖片固定在原位，每一行字都能修改，適合只改幾個字</label></div><div class="row"><label><input type="radio" name="cvWm" value="image"> <b>每頁一張圖</b>：外觀完全一樣，但不能改字</label></div><div class="row"><label><input type="checkbox" id="cvOcr" checked> 掃描頁先做文字辨識</label></div><div class="info">表格要有框線才認得出來；沒有框線、只靠空白對齊的表格會轉成用 Tab 對齊的文字。字型會換成 Word 內建的微軟正黑體／Arial，字寬可能略有不同。</div>`;
+    else if (f === 'docx') o.innerHTML = `<div class="row"><label><input type="radio" name="cvWm" value="text" checked> <b>可編輯（建議）</b>：保留圖片、表格、合併儲存格、底色和粗體，可以直接增刪內容</label></div><div class="row"><label><input type="radio" name="cvWm" value="layout"> <b>版面跟原檔一樣</b>：框線和圖片固定在原位，每一行字都能修改，適合只改幾個字</label></div><div class="row"><label><input type="radio" name="cvWm" value="image"> <b>每頁一張圖</b>：外觀完全一樣，但不能改字</label></div><div class="row"><label><input type="checkbox" id="cvOcr" checked> 掃描頁先做文字辨識</label></div><div class="info">表格要有框線才認得出來；沒有框線、只靠空白對齊的表格會轉成用 Tab 對齊的文字。字型會換成 Word 內建的微軟正黑體／Arial，字寬可能略有不同。</div>`;
     else if (f === 'xlsx') o.innerHTML = `<div class="row"><label><input type="radio" name="cvXm" value="pages" checked> 每一頁一個工作表</label><label><input type="radio" name="cvXm" value="one"> 全部放同一個工作表</label></div><div class="row"><label><input type="checkbox" id="cvOcr" checked> 掃描頁先做文字辨識</label></div><div class="info">有框線的表格會照原本的格子轉出，合併儲存格也會保留；沒有框線的部分依文字位置自動分欄。數字會轉成可以計算的數值。</div>`;
     else o.innerHTML = `<div class="row"><label><input type="checkbox" id="cvNotes" checked> 把每頁的文字放進「備忘稿」</label></div><div class="info">每一頁變成一張投影片，外觀和 PDF 一樣。</div>`;
   };
