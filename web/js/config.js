@@ -4,6 +4,7 @@ window.APP_CONFIG = {
   owner: 'wingfeeling',                                   // 經營者
   ownerNote: '此網站為個人經營，回覆較慢請見諒。',
   supportEmail: 'wingfeeling@gmail.com',                  // 客服信箱
+  copyright: 'wingfeeling',                               // 頁尾「© 年份 wingfeeling 版權所有」
   // 後端網址。如果後端掛在同一個網域的 /api/*，就留空字串 ''
   apiBase: '',
   // Firebase 主控台 → 專案設定 → 一般 → 你的應用程式 → SDK 設定

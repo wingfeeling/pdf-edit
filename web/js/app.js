@@ -68,7 +68,7 @@
   function footer() {
     const f = document.querySelector('footer'); if (!f || f.dataset.info) return; f.dataset.info = 1;
     if (!f.querySelector('a[href="wish.html"]')) f.insertAdjacentHTML('beforeend', '<a href="wish.html">許願池・客服</a>');
-    f.insertAdjacentHTML('beforeend', `<div class="small muted" style="width:100%;margin-top:8px">${esc(C.siteName || '')}・經營者：${esc(C.owner || '')}・客服信箱：<a href="mailto:${esc(C.supportEmail || '')}">${esc(C.supportEmail || '')}</a><br>${esc(C.ownerNote || '')}</div>`);
+    f.insertAdjacentHTML('beforeend', `<div class="small muted" style="width:100%;margin-top:8px">${esc(C.siteName || '')}・經營者：${esc(C.owner || '')}・客服信箱：<a href="mailto:${esc(C.supportEmail || '')}">${esc(C.supportEmail || '')}</a><br>${esc(C.ownerNote || '')}<br>© ${new Date().getFullYear()} ${esc(C.copyright || C.owner || '')} 版權所有</div>`);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', footer); else footer();
   function fmtDate(ms, time) { if (!ms) return ''; const d = new Date(ms); const p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())}` + (time ? ` ${p(d.getHours())}:${p(d.getMinutes())}` : ''); }
