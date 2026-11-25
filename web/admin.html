@@ -17,6 +17,15 @@
 .em{cursor:pointer;border-bottom:1px dashed #9ca3af}
 .bar{height:8px;background:#eef2ff;border-radius:6px;overflow:hidden;margin-top:8px}.bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
 .match-ok{color:var(--ok)}.match-no{color:var(--danger)}
+details.help{background:#fff;border:1px solid var(--line);border-radius:12px;margin:0 0 16px}
+details.help>summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:14.5px;list-style:none;display:flex;align-items:center;gap:8px}
+details.help>summary::-webkit-details-marker{display:none}
+details.help>summary::before{content:'▸';color:var(--muted);transition:transform .15s}
+details.help[open]>summary::before{transform:rotate(90deg)}
+details.help .hb{padding:0 18px 16px;font-size:14px}
+details.help ol{padding-left:22px;margin:6px 0}details.help li{margin:3px 0}
+details.help h4{margin:14px 0 4px;font-size:14px}
+.idbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.idbox code{background:#f3f4f6;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:13px;word-break:break-all}
 </style>
 </head>
 <body>
@@ -25,6 +34,33 @@
   <h1>批次線上簽名</h1>
   <p class="sub">每個批次只有<b>一個共用網址</b>，用 Email、LINE 或群組發給大家就好。打開網址的人先用 Google 帳號登入（第一次登入就等於註冊），系統會依他的 Email 帶到他要簽的那份。簽好回傳後就會鎖定，你可以在這裡查看進度、退回重簽、一次下載全部已簽檔案。</p>
   <div class="grid small muted" style="margin:-4px 0 14px;gap:8px"><div class="notice info" style="margin:0"><b>指定人員</b>：上傳文件和名單，每份文件指定 1 個人簽，只有名單上的 Email 打得開。</div><div class="notice info" style="margin:0"><b>多人簽同一份</b>：每份文件最多 5 個人，照順序輪流簽，後面的人看得到前面的人簽好的樣子，就像紙本傳下去簽。</div><div class="notice info" style="margin:0"><b>連署</b>：放一份文件，拿到網址的人登入就能簽，每簽一個人就多一份。</div></div>
+  <details class="help" id="helpEdu">
+    <summary>學生用學校帳號登入時出現「已封鎖存取權」？點這裡看怎麼處理</summary>
+    <div class="hb">
+      <p>如果學生登入時看到「已封鎖存取權：必須通過貴機構管理員的審查」，錯誤代碼是 <b>400：access_not_configured</b>，這不是網站故障，你自己也沒辦法解決。原因是學校的 Google 帳號把學生設成未滿 18 歲，學校沒設定過的外部網站都不能用 Google 登入。只要請學校管理 Google 帳號的人（通常是資訊組）照下面的步驟開放一次，全校學生就都能登入。一般 Gmail 和老師的帳號通常不受影響。</p>
+      <h4>本網站的 OAuth 用戶端 ID（設定時要用）</h4>
+      <div class="idbox" id="helpIdBox"></div>
+      <h4>資訊人員的設定步驟（大約 5 分鐘）</h4>
+      <ol>
+        <li>用超級管理員帳號登入 Google 管理控制台：<a href="https://admin.google.com" target="_blank" rel="noopener">admin.google.com</a></li>
+        <li>左邊選單點「安全性」→「存取權和資料控管」→「API 控制項」。</li>
+        <li>在「應用程式存取權控管」區塊點「管理第三方應用程式存取權」。</li>
+        <li>點「設定新的應用程式」。舊版畫面是「新增應用程式」→「OAuth 應用程式名稱或用戶端 ID」。</li>
+        <li>在搜尋框貼上上面的 OAuth 用戶端 ID，點搜尋。</li>
+        <li>點搜尋結果，勾選那組用戶端 ID，再按「選取」。</li>
+        <li>選套用範圍：可以選整個機構，也可以只選學生所在的機構單位。</li>
+        <li>存取權選「信任」，按「繼續」，再按「完成」。</li>
+      </ol>
+      <h4>補充說明</h4>
+      <ul style="padding-left:22px;margin:6px 0">
+        <li>本網站只取得 Google 登入的基本資料（姓名、Email、大頭貼），不會讀取 Gmail、雲端硬碟或其他 Google 服務的資料。</li>
+        <li>設定通常幾分鐘內生效，最久大約 24 小時。生效後請學生重新整理頁面再登入。</li>
+        <li>只要開放這一個網站就好，不用放寬「未設定的第三方應用程式」的整體設定。</li>
+        <li>按鈕名稱是照目前的中文介面寫的，Google 偶爾會改名稱，找位置附近名稱差不多的就對了。</li>
+      </ul>
+      <div class="row" style="margin-top:12px"><button class="btn primary sm" id="helpCopy">複製整段說明，傳給資訊人員</button></div>
+    </div>
+  </details>
   <div id="needLogin" class="card" style="display:none"><h3>請先登入</h3><p class="muted">批次簽名的資料只有你自己看得到，請用 Google 帳號登入。</p><button class="btn primary" id="btnLogin">用 Google 登入</button></div>
   <div id="main" class="layout" style="display:none">
     <aside>
@@ -48,6 +84,21 @@
 'use strict';
 const $ = s => document.querySelector(s), esc = App.esc;
 App.header('admin.html');
+/* ---------- 學校帳號被擋的說明 ---------- */
+(function () {
+  const C = window.APP_CONFIG || {}, id = C.googleClientId || '', site = (C.firebase && C.firebase.authDomain) || location.host;
+  const box = $('#helpIdBox');
+  if (id) {
+    box.innerHTML = `<code>${esc(id)}</code><button class="btn sm" id="helpIdCp">複製</button>`;
+    $('#helpIdCp').onclick = async () => { try { await navigator.clipboard.writeText(id); toast('已複製用戶端 ID'); } catch (e) { toast('請手動選取複製'); } };
+  } else box.innerHTML = `<span class="muted">網站還沒填上用戶端 ID，請寫信到 <a href="mailto:${esc(C.supportEmail || '')}">${esc(C.supportEmail || '客服信箱')}</a> 索取。</span>`;
+  $('#helpCopy').onclick = async () => {
+    const steps = [...document.querySelectorAll('#helpEdu ol li')].map((li, i) => `${i + 1}. ${li.textContent.trim()}`).join('\n');
+    const notes = [...document.querySelectorAll('#helpEdu ul li')].map(li => `・${li.textContent.trim()}`).join('\n');
+    const t = `主旨：請協助開放學生 Google 帳號登入「${C.siteName || site}」網站\n\n您好，\n\n學生用學校 Google 帳號登入簽名網站時出現「已封鎖存取權」，錯誤代碼是 400：access_not_configured。原因是學生帳號被設為未滿 18 歲，學校沒設定過的第三方應用程式都不能用 Google 登入。麻煩您在 Google 管理控制台把這個網站設為「信任」。\n\n【應用程式資料】\n・名稱：${site}\n・OAuth 用戶端 ID：${id || '（請向網站索取）'}\n・用途：讓學生用 Google 登入，在網站上簽署文件\n\n【設定步驟】\n${steps}\n\n【補充說明】\n${notes}\n\n謝謝您！`;
+    try { await navigator.clipboard.writeText(t); toast('已複製，可以直接貼到 Email 或 LINE 傳給資訊人員'); } catch (e) { toast('瀏覽器不允許複製，請手動選取上面的說明'); }
+  };
+})();
 const ST = { pending: '未發出', sent: '已發出', partial: '簽名中', signed: '已簽', returned: '退回重簽' };
 const MODE = { list: '指定人員', multi: '多人簽同一份', open: '連署' };
 const NUM = '①②③④⑤';

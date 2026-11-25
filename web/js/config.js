@@ -7,6 +7,10 @@ window.APP_CONFIG = {
   copyright: 'wingfeeling',                               // 頁尾「© 年份 wingfeeling 版權所有」
   // 後端網址。如果後端掛在同一個網域的 /api/*，就留空字串 ''
   apiBase: '',
+  // Google 登入的 OAuth 用戶端 ID（結尾是 .apps.googleusercontent.com）。
+  // 學校的資訊人員要用這串把網站設成「信任」，學生的學校帳號才能登入。這串本來就是公開的，可以放在網頁上。
+  // 在哪裡找：Firebase 主控台 → Authentication → 登入方式 → Google → 網頁 SDK 設定 → 網頁用戶端 ID
+  googleClientId: '661653578609-jkrnijlqaurekguokdglnoaofua0591q.apps.googleusercontent.com',
   // Firebase 主控台 → 專案設定 → 一般 → 你的應用程式 → SDK 設定
   firebase: {
     apiKey: 'AIzaSyAnsN72g5l4VlensGpgwY9R3FFRKKoV1PE',
