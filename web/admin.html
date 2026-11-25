@@ -9,6 +9,10 @@
 @media(max-width:900px){.layout{grid-template-columns:1fr}}
 .blist a{display:block;padding:10px 12px;border-radius:10px;text-decoration:none;color:var(--text);border:1px solid transparent;margin-bottom:6px;background:#fff}
 .blist a.on{border-color:#c7d2fe;background:var(--accent-soft)}
+.blist .it{position:relative}.blist .it a{padding-right:38px}
+.blist .del{position:absolute;top:8px;right:6px;width:28px;height:28px;border:0;border-radius:7px;background:transparent;color:#9ca3af;cursor:pointer;display:grid;place-items:center;opacity:.55}
+.blist .it:hover .del,.blist .del:focus{opacity:1}.blist .del:hover{background:#fef2f2;color:var(--danger)}
+@media(hover:none){.blist .del{opacity:1}}
 .blist a b{display:block;font-size:14px}.blist a span{font-size:12px;color:var(--muted)}
 .stats{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 14px}.stats div{background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:6px 14px;font-size:13px}.stats b{font-size:18px;margin-right:4px}
 .tools{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
@@ -143,8 +147,10 @@ function keepWarn(b) {
 }
 async function loadBatches() {
   batches = (await App.api('/api/batches')).batches;
-  $('#blist').innerHTML = batches.map(b => `<a href="?b=${b.id}" data-id="${b.id}" class="${cur && cur.id === b.id ? 'on' : ''}"><b>${esc(b.name)}</b><span>${MODE[b.mode] || MODE.list}・${b.mode === 'open' ? `${b.total || 0} 人已簽` : `${b.signed || 0} / ${b.total || 0} 已簽`}・${App.fmtDate(b.created_at)}</span></a>`).join('') || '<p class="muted small">還沒有批次</p>';
+  const TRASH = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>';
+  $('#blist').innerHTML = batches.map(b => `<div class="it"><a href="?b=${b.id}" data-id="${b.id}" class="${cur && cur.id === b.id ? 'on' : ''}"><b>${esc(b.name)}</b><span>${MODE[b.mode] || MODE.list}・${b.mode === 'open' ? `${b.total || 0} 人已簽` : `${b.signed || 0} / ${b.total || 0} 已簽`}・${App.fmtDate(b.created_at)}</span></a><button class="del" data-del="${b.id}" title="刪除這個批次" aria-label="刪除這個批次">${TRASH}</button></div>`).join('') || '<p class="muted small">還沒有批次</p>';
   document.querySelectorAll('#blist a').forEach(a => a.onclick = e => { e.preventDefault(); history.replaceState(null, '', '?b=' + a.dataset.id); openBatch(a.dataset.id); });
+  document.querySelectorAll('#blist .del').forEach(x => x.onclick = e => { e.preventDefault(); e.stopPropagation(); const b = batches.find(y => String(y.id) === x.dataset.del); if (b) delBatch(b); });
 }
 async function openBatch(id) {
   try { const r = await App.api('/api/batches/' + id); cur = r.batch; curDocs = r.docs; docLimit = r.doc_limit; }
@@ -181,7 +187,7 @@ function renderDetail() {
     <div class="tablebox"><table class="t"><thead><tr>${open ? '<th></th><th>姓名</th><th>Email</th><th>狀態</th><th>簽名時間</th><th>已簽檔案</th><th>操作</th>'
       : `<th></th><th>檔名</th><th>學號／編號</th><th>姓名</th><th>${b.mode === 'multi' ? '簽名人（依順序）' : 'Email'}</th><th>個人網址</th><th>狀態</th><th>發出時間</th><th>已簽檔案</th><th>操作</th>`}</tr></thead><tbody id="tb"></tbody></table></div>
   </div>`;
-  $('#bSet').onclick = batchSettings; $('#bDelB').onclick = delBatch; $('#bZip').onclick = zipSigned;
+  $('#bSet').onclick = batchSettings; $('#bDelB').onclick = () => delBatch(cur); $('#bZip').onclick = zipSigned;
   $('#jCp').onclick = async () => { try { await navigator.clipboard.writeText(b.join_url); toast('已複製共用簽名網址'); } catch (e) { $('#jUrl').select(); toast('請按 Ctrl+C 複製'); } };
   if (open) { $('#bTpl').onclick = uploadTemplate; if ($('#tView')) $('#tView').onclick = e => { e.preventDefault(); openBlob(`/api/batches/${b.id}/template`); }; }
   else { $('#bUp').onclick = uploadDialog; $('#bList').onclick = listDialog; $('#bMark').onclick = markSent; }
@@ -283,9 +289,25 @@ function batchSettings() {
   modal(`<h3>批次設定</h3>${batchForm(cur)}<div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="fGo">儲存</button></div>`);
   $('#fGo').onclick = async () => { try { await App.api('/api/batches/' + cur.id, { method: 'PATCH', body: { name: $('#fName').value, org_name: $('#fOrg').value, deadline: dateOut($('#fDl').value), message: $('#fMsg').value, ...(cur.mode === 'open' ? { max_signers: +$('#fMax').value || 0 } : {}), ...($('#fForever').checked ? { forever: true } : { retain_until: dateOut($('#fKeep').value) }) } }); closeModal(); await loadBatches(); openBatch(cur.id); toast('已儲存'); } catch (e) { toast(e.message); } };
 }
-async function delBatch() {
-  if (prompt(`刪除後，這個批次的所有原檔、已簽檔和簽名網址都會永久刪除。\n確定要刪除請輸入批次名稱：「${cur.name}」`) !== cur.name) return;
-  const rr = await App.api('/api/batches/' + cur.id, { method: 'DELETE' }); cur = null; await refreshMe(); if (rr.refunded) toast(`還沒有人簽的 ${rr.refunded} 份已退回`); history.replaceState(null, '', 'admin.html'); await loadBatches(); $('#detail').innerHTML = '<div class="card muted">已刪除。</div>';
+function delBatch(b) {
+  b = b && b.id ? b : cur; if (!b) return;
+  const signed = b.mode === 'open' ? (b.total || 0) : (b.signed || 0);
+  modal(`<h3>刪除批次「${esc(b.name)}」？</h3>
+    <p>刪除後，這個批次的所有原檔、已簽檔和簽名網址都會<b>永久刪除</b>，沒辦法復原。已經發出去的網址也會打不開。</p>
+    ${signed ? `<div class="notice warn">這個批次已經有 <b>${signed}</b> 份簽好了。需要留存的話，請先打開批次按「下載全部已簽檔案」。</div>
+    <label class="row small" style="gap:8px;margin:10px 0"><input type="checkbox" id="dOk"> 我已經下載好需要的檔案，確定要刪除</label>` : '<p class="small muted">還沒有人簽的文件，預留的份數會退回。</p>'}
+    <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" id="dGo" style="background:var(--danger);border-color:var(--danger)" ${signed ? 'disabled' : ''}>刪除</button></div>`);
+  if (signed) $('#dOk').onchange = e => { $('#dGo').disabled = !e.target.checked; };
+  $('#dGo').onclick = async () => {
+    $('#dGo').disabled = true;
+    try {
+      const rr = await App.api('/api/batches/' + b.id, { method: 'DELETE' }); closeModal();
+      const wasCur = cur && String(cur.id) === String(b.id);
+      if (wasCur) { cur = null; history.replaceState(null, '', 'admin.html'); $('#detail').innerHTML = '<div class="card muted">已刪除。</div>'; }
+      await refreshMe(); await loadBatches();
+      toast(rr && rr.refunded ? `已刪除「${b.name}」，還沒有人簽的 ${rr.refunded} 份已退回` : `已刪除「${b.name}」`);
+    } catch (e) { $('#dGo').disabled = false; toast(e.message); }
+  };
 }
 /* ---------- 上傳文件與名單 ---------- */
 let upFiles = [], roster = null;
