@@ -29,6 +29,7 @@ details.help[open]>summary::before{transform:rotate(90deg)}
 details.help .hb{padding:0 18px 16px;font-size:14px}
 details.help ol{padding-left:22px;margin:6px 0}details.help li{margin:3px 0}
 details.help h4{margin:14px 0 4px;font-size:14px}
+details.help img.shot{display:block;max-width:100%;width:340px;height:auto;margin:8px 0 6px;border:1px solid var(--line);border-radius:8px}
 .idbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.idbox code{background:#f3f4f6;border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:13px;word-break:break-all}
 </style>
 </head>
@@ -49,6 +50,7 @@ details.help h4{margin:14px 0 4px;font-size:14px}
         <li>用超級管理員帳號登入 Google 管理控制台：<a href="https://admin.google.com" target="_blank" rel="noopener">admin.google.com</a></li>
         <li>左邊選單點「安全性」→「存取權和資料控管」→「API 控制項」。</li>
         <li>在「應用程式存取權控管」區塊點「管理第三方應用程式存取權」。</li>
+        <li>點「查看清單」<span class="nocopy">（如下圖紅框處）</span>。<img class="shot" src="img/admin-view-list.jpg" alt="管理第三方應用程式存取權頁面上的「查看清單」連結" width="522" height="260" loading="lazy"></li>
         <li>點「設定新的應用程式」。舊版畫面是「新增應用程式」→「OAuth 應用程式名稱或用戶端 ID」。</li>
         <li>在搜尋框貼上上面的 OAuth 用戶端 ID，點搜尋。</li>
         <li>點搜尋結果，勾選那組用戶端 ID，再按「選取」。</li>
@@ -97,7 +99,7 @@ App.header('admin.html');
     $('#helpIdCp').onclick = async () => { try { await navigator.clipboard.writeText(id); toast('已複製用戶端 ID'); } catch (e) { toast('請手動選取複製'); } };
   } else box.innerHTML = `<span class="muted">網站還沒填上用戶端 ID，請寫信到 <a href="mailto:${esc(C.supportEmail || '')}">${esc(C.supportEmail || '客服信箱')}</a> 索取。</span>`;
   $('#helpCopy').onclick = async () => {
-    const steps = [...document.querySelectorAll('#helpEdu ol li')].map((li, i) => `${i + 1}. ${li.textContent.trim()}`).join('\n');
+    const steps = [...document.querySelectorAll('#helpEdu ol li')].map((li, i) => { const c = li.cloneNode(true); c.querySelectorAll('.nocopy,img').forEach(n => n.remove()); return `${i + 1}. ${c.textContent.trim()}`; }).join('\n');
     const notes = [...document.querySelectorAll('#helpEdu ul li')].map(li => `・${li.textContent.trim()}`).join('\n');
     const t = `主旨：請協助開放學生 Google 帳號登入「${C.siteName || site}」網站\n\n您好，\n\n學生用學校 Google 帳號登入簽名網站時出現「已封鎖存取權」，錯誤代碼是 400：access_not_configured。原因是學生帳號被設為未滿 18 歲，學校沒設定過的第三方應用程式都不能用 Google 登入。麻煩您在 Google 管理控制台把這個網站設為「信任」。\n\n【應用程式資料】\n・名稱：${site}\n・OAuth 用戶端 ID：${id || '（請向網站索取）'}\n・用途：讓學生用 Google 登入，在網站上簽署文件\n\n【設定步驟】\n${steps}\n\n【補充說明】\n${notes}\n\n謝謝您！`;
     try { await navigator.clipboard.writeText(t); toast('已複製，可以直接貼到 Email 或 LINE 傳給資訊人員'); } catch (e) { toast('瀏覽器不允許複製，請手動選取上面的說明'); }
